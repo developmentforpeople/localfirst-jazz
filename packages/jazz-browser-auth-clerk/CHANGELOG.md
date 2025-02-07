@@ -1,5 +1,14 @@
 # jazz-browser-media-images
 
+## 0.9.23
+
+### Patch Changes
+
+- Updated dependencies [70c9a5d]
+  - cojson@0.9.23
+  - jazz-browser@0.9.23
+  - jazz-tools@0.9.23
+
 ## 0.9.22
 
 ### Patch Changes

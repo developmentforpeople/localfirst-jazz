@@ -1,5 +1,11 @@
 # cojson
 
+## 0.9.23
+
+### Patch Changes
+
+- 70c9a5d: Rotate keys before revoking access, so when admins remove themselves the keys are successfully rotated
+
 ## 0.9.19
 
 ### Patch Changes
