@@ -24,6 +24,9 @@ import { createJazzContext } from "jazz-tools";
 import { StorageConfig, getStorageOptions } from "./storageOptions.js";
 import { setupInspector } from "./utils/export-account-inspector.js";
 
+// DFP added export
+export { getStorageOptions };
+
 setupInspector();
 
 export type BaseBrowserContextOptions = {
@@ -47,7 +50,8 @@ class BrowserWebSocketPeerWithReconnection extends WebSocketPeerWithReconnection
   }
 }
 
-async function setupPeers(options: BaseBrowserContextOptions) {
+// DFP added export
+export async function setupPeers(options: BaseBrowserContextOptions) {
   const crypto = options.crypto || (await WasmCrypto.create());
   let node: LocalNode | undefined = undefined;
 
