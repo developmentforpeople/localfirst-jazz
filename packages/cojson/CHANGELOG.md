@@ -1,5 +1,48 @@
 # cojson
 
+## 0.19.11
+
+### Patch Changes
+
+- c00a454: Resolve footgun in Account.createAs() that made it easy to save the wrong credentials.
+  - cojson-core-wasm@0.19.11
+  - cojson-core-rn@0.19.11
+  - cojson-core-napi@0.19.11
+
+## 0.19.10
+
+### Patch Changes
+
+- Updated dependencies [4f5a5e7]
+  - cojson-core-rn@0.19.10
+  - cojson-core-wasm@0.19.10
+  - cojson-core-napi@0.19.10
+
+## 0.19.9
+
+### Patch Changes
+
+- d901caa: Added cojson-core-rn that improves ReactNative crypto performance
+- Updated dependencies [d901caa]
+  - cojson-core-rn@0.1.1
+  - cojson-core-wasm@0.19.9
+  - cojson-core-napi@0.19.9
+
+## 0.19.8
+
+### Patch Changes
+
+- 93e4a34: Improved the transaction revalidation system to consider parent groups and rebuild only when the validity of the transactions changes
+  - cojson-core-wasm@0.19.8
+  - cojson-core-napi@0.19.8
+
+## 0.19.7
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.7
+- cojson-core-napi@0.19.7
+
 ## 0.19.6
 
 ### Patch Changes
@@ -243,7 +286,6 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
-
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -264,7 +306,6 @@
 - 2ddf4d9: Introducing version control APIs, unstable_branch and unstable_merge
 
   Flagged as unstable because branch & merge scope & propagation needs to be validated.
-
   - cojson-core-wasm@0.18.13
 
 ## 0.18.12
@@ -480,7 +521,6 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
-
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

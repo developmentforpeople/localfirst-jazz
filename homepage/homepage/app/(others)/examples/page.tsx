@@ -10,6 +10,9 @@ import { GappedGrid } from "@garden-co/design-system/src/components/molecules/Ga
 import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 import { clsx } from "clsx";
 import type { Metadata } from "next";
+import journalImage from "@/components/examples/images/journal.png";
+import ssrTodoImage from "@/components/examples/images/ssr-todo.png";
+import todoImage from "@/components/examples/images/todo.jpg";
 
 const metaTags = {
   title: "Examples",
@@ -371,15 +374,6 @@ const reactExamples: Example[] = [
     illustration: <FileUploadIllustration />,
   },
   {
-    name: "Reactions",
-    slug: "reactions",
-    description: "Collect and render reactions from multiple users.",
-    tech: [tech.react],
-    features: [features.coFeed],
-    demoUrl: "https://reactions.demo.jazz.tools",
-    illustration: <ReactionsIllustration />,
-  },
-  {
     name: "Cursor presence",
     slug: "multi-cursors",
     description:
@@ -388,6 +382,17 @@ const reactExamples: Example[] = [
     features: [features.coFeed],
     demoUrl: "https://multi-cursors.demo.jazz.tools",
     illustration: <MultiCursorIllustration />,
+  },
+  {
+    name: "Personal Journal with vector search",
+    slug: "vector-search",
+    description: "A personal journal app with local-first vector search, 100% Jazz.",
+    tech: [tech.react],
+    features: [features.vectorSearch],
+    demoUrl: "https://vector-search.demo.jazz.tools/",
+    illustration: (
+      <div className="h-full w-full bg-cover bg-bottom-left" style={{ backgroundImage: `url(${journalImage.src})` }}></div>
+    ),
   },
   {
     name: "Collaborative rich text with ProseMirror",
@@ -400,24 +405,15 @@ const reactExamples: Example[] = [
     illustration: <CoTextIllustration />,
   },
   {
-    name: "Collaborative rich text with ProseKit",
-    slug: "richtext-prosekit",
-    description:
-      "Handle multiple users editing the same text, integrated with a ProseKit editor for rich text.",
+    name: "A server-side rendered todo list",
+    slug: "jazz-nextjs",
+    description: "An example on how to use Jazz with Next.js Server Components",
     tech: [tech.react],
-    features: [features.coRichText, features.coPlainText],
-    demoUrl: "https://richtext-prosekit.demo.jazz.tools",
-    illustration: <CoTextIllustration />,
-  },
-  {
-    name: "Collaborative rich text with Tiptap",
-    slug: "richtext-tiptap",
-    description:
-      "Handle multiple users editing the same text, integrated with a Tiptap editor for rich text.",
-    tech: [tech.react],
-    features: [features.coRichText, features.coPlainText],
-    demoUrl: "https://richtext-tiptap.demo.jazz.tools",
-    illustration: <CoTextIllustration />,
+    features: [features.nextjs],
+    demoUrl: "https://jazz-nextjs.vercel.app/",
+    illustration: (
+      <div className="h-full w-full bg-cover bg-bottom-left" style={{ backgroundImage: `url(${ssrTodoImage.src})` }}></div>
+    ),
   },
   {
     name: "Todo list",
@@ -427,7 +423,7 @@ const reactExamples: Example[] = [
     features: [features.inviteLink],
     demoUrl: "https://todo.demo.jazz.tools",
     illustration: (
-      <div className="h-full w-full bg-cover bg-[url('/todo.jpg')] bg-bottom-left"></div>
+      <div className="h-full w-full bg-cover bg-bottom-left" style={{ backgroundImage: `url(${todoImage.src})` }}></div>
     ),
   },
   {
@@ -444,9 +440,9 @@ const reactExamples: Example[] = [
     name: "Server-side HTTP requests",
     slug: "server-worker-http",
     description:
-      "A game that shows how to manage state in a trusted environment through the experimental HTTP API.",
+      "A game that shows how to manage state in a trusted environment through the experimental JazzRPC API.",
     tech: [tech.react],
-    features: [features.serverWorker],
+    features: [features.serverWorker, features.nextjs],
     illustration: <JazzPaperScissorsIllustration />,
     demoUrl: "https://jazz-paper-scissors.demo.jazz.tools",
   },
@@ -500,7 +496,7 @@ const reactExamples: Example[] = [
 
 const rnExamples: Example[] = [
   {
-    name: "Chat",
+    name: "Chat with React Native vanilla",
     slug: "chat-rn",
     description:
       "A simple React Native app that creates a chat room with a shareable link.",
@@ -509,7 +505,7 @@ const rnExamples: Example[] = [
   },
 
   {
-    name: "Chat",
+    name: "Chat with Expo",
     slug: "chat-rn-expo",
     description:
       "A simple Expo app that creates a chat room with a shareable link.",

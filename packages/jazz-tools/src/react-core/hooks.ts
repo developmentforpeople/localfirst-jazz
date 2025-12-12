@@ -2,6 +2,7 @@ import { useSyncExternalStoreWithSelector } from "use-sync-external-store/shim/w
 import React, {
   useCallback,
   useContext,
+  useMemo,
   useRef,
   useSyncExternalStore,
 } from "react";
@@ -22,18 +23,20 @@ import {
   Loaded,
   MaybeLoaded,
   NotLoaded,
+  RefsToResolve,
   ResolveQuery,
   ResolveQueryStrict,
   SchemaResolveQuery,
   SubscriptionScope,
-  coValueClassFromCoValueClassOrSchema,
   importContentPieces,
+  captureStack,
   getUnloadedCoValueWithoutId,
   type BranchDefinition,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
 import { CoValueSubscription } from "./types.js";
+import { use } from "./use.js";
 
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
@@ -104,6 +107,12 @@ export function useCoValueSubscription<
   const contextManager = useJazzContextManager();
   const agent = useAgent();
 
+  const callerStack = React.useRef<Error | undefined>(undefined);
+
+  if (!callerStack.current) {
+    callerStack.current = captureStack();
+  }
+
   const createSubscription = () => {
     if (!id) {
       return {
@@ -126,18 +135,21 @@ export function useCoValueSubscription<
     const resolve = getResolveQuery(Schema, options?.resolve);
 
     const node = contextManager.getCurrentValue()!.node;
-    const subscription = new SubscriptionScope<any>(
+    const cache = contextManager.getSubscriptionScopeCache();
+    const subscription = cache.getOrCreate(
       node,
-      resolve,
+      Schema,
       id,
-      {
-        ref: coValueClassFromCoValueClassOrSchema(Schema),
-        optional: true,
-      },
+      resolve,
       false,
       false,
       options?.unstable_branch,
     );
+
+    // Set callerStack on returned subscription after retrieval
+    if (callerStack.current) {
+      subscription.callerStack = callerStack.current;
+    }
 
     return {
       value: subscription,
@@ -173,7 +185,6 @@ export function useCoValueSubscription<
     subscription.branchOwnerId !== branchOwnerId ||
     subscription.agent !== agent
   ) {
-    subscription.value?.destroy();
     subscriptionRef.current = createSubscription();
     subscription = subscriptionRef.current;
   }
@@ -433,6 +444,79 @@ export function useCoState<
   return value;
 }
 
+export function useSuspenseCoState<
+  S extends CoValueClassOrSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+  TSelectorReturn = Loaded<S, R>,
+>(
+  /** The CoValue schema or class constructor */
+  Schema: S,
+  /** The ID of the CoValue to subscribe to */
+  id: string,
+  /** Optional configuration for the subscription */
+  options?: {
+    /** Resolve query to specify which nested CoValues to load */
+    resolve?: ResolveQueryStrict<S, R>;
+    /** Select which value to return */
+    select?: (value: Loaded<S, R>) => TSelectorReturn;
+    /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
+    /**
+     * Create or load a branch for isolated editing.
+     *
+     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
+     * It's a fork of your data graph: the same schema, but with diverging values.
+     *
+     * The checkout of the branch is applied on all the resolved values.
+     *
+     * @param name - A unique name for the branch. This identifies the branch
+     *   and can be used to switch between different branches of the same CoValue.
+     * @param owner - The owner of the branch. Determines who can access and modify
+     *   the branch. If not provided, the branch is owned by the current user.
+     *
+     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
+     */
+    unstable_branch?: BranchDefinition;
+    preloaded?: ExportedCoValue<Loaded<S, R>>;
+  },
+): TSelectorReturn {
+  useImportCoValueContent(id, options?.preloaded);
+
+  const subscription = useCoValueSubscription(Schema, id, options);
+
+  if (!subscription) {
+    throw new Error("Subscription not found");
+  }
+
+  use(subscription.getPromise());
+
+  const getCurrentValue = () => {
+    const value = subscription.getCurrentValue();
+
+    if (!value.$isLoaded) {
+      throw new Error("CoValue must be loaded in a suspense context");
+    }
+
+    return value;
+  };
+
+  const value = useSyncExternalStoreWithSelector<Loaded<S, R>, TSelectorReturn>(
+    React.useCallback(
+      (callback) => {
+        return subscription.subscribe(callback);
+      },
+      [subscription],
+    ),
+    getCurrentValue,
+    getCurrentValue,
+    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.equalityFn ?? Object.is,
+  );
+
+  return value;
+}
+
 export function useSubscriptionSelector<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
@@ -481,6 +565,12 @@ export function useAccountSubscription<
 ) {
   const contextManager = useJazzContextManager();
 
+  // Capture stack trace at hook call time
+  const callerStack = React.useRef<Error | undefined>(undefined);
+  if (!callerStack.current) {
+    callerStack.current = captureStack();
+  }
+
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
 
@@ -495,18 +585,21 @@ export function useAccountSubscription<
     const resolve = getResolveQuery(Schema, options?.resolve);
 
     const node = contextManager.getCurrentValue()!.node;
-    const subscription = new SubscriptionScope<any>(
+    const cache = contextManager.getSubscriptionScopeCache();
+    const subscription = cache.getOrCreate(
       node,
-      resolve,
+      Schema,
       agent.$jazz.id,
-      {
-        ref: coValueClassFromCoValueClassOrSchema(Schema),
-        optional: true,
-      },
+      resolve,
       false,
       false,
       options?.unstable_branch,
     );
+
+    // Set callerStack on returned subscription after retrieval
+    if (callerStack.current) {
+      subscription.callerStack = callerStack.current;
+    }
 
     return {
       subscription,
@@ -529,12 +622,12 @@ export function useAccountSubscription<
       subscription.branchName !== options?.unstable_branch?.name ||
       subscription.branchOwnerId !== options?.unstable_branch?.owner?.$jazz.id
     ) {
-      subscription.subscription?.destroy();
+      // No need to manually destroy - cache handles cleanup via SubscriptionScope lifecycle
       setSubscription(createSubscription());
     }
 
     return contextManager.subscribe(() => {
-      subscription.subscription?.destroy();
+      // No need to manually destroy - cache handles cleanup via SubscriptionScope lifecycle
       setSubscription(createSubscription());
     });
   }, [Schema, contextManager, branchName, branchOwnerId]);
@@ -672,6 +765,78 @@ export function useAccount<
     MaybeLoaded<Loaded<A, R>>,
     TSelectorReturn
   >(
+    React.useCallback(
+      (callback) => {
+        if (!subscription) {
+          return () => {};
+        }
+
+        return subscription.subscribe(callback);
+      },
+      [subscription],
+    ),
+    getCurrentValue,
+    getCurrentValue,
+    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.equalityFn ?? Object.is,
+  );
+}
+
+export function useSuspenseAccount<
+  A extends AccountClass<Account> | AnyAccountSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<A> = SchemaResolveQuery<A>,
+  TSelectorReturn = Loaded<A, R>,
+>(
+  /** The account schema to use. Defaults to the base Account schema */
+  AccountSchema: A = Account as unknown as A,
+  /** Optional configuration for the subscription */
+  options?: {
+    /** Resolve query to specify which nested CoValues to load from the account */
+    resolve?: ResolveQueryStrict<A, R>;
+    /** Select which value to return from the account data */
+    select?: (account: Loaded<A, R>) => TSelectorReturn;
+    /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
+    /**
+     * Create or load a branch for isolated editing.
+     *
+     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
+     * It's a fork of your data graph: the same schema, but with diverging values.
+     *
+     * The checkout of the branch is applied on all the resolved values.
+     *
+     * @param name - A unique name for the branch. This identifies the branch
+     *   and can be used to switch between different branches of the same CoValue.
+     * @param owner - The owner of the branch. Determines who can access and modify
+     *   the branch. If not provided, the branch is owned by the current user.
+     *
+     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
+     */
+    unstable_branch?: BranchDefinition;
+  },
+): TSelectorReturn {
+  const subscription = useAccountSubscription(AccountSchema, options);
+
+  if (!subscription) {
+    throw new Error(
+      "Subscription not found, are you using useSuspenseAccount in guest mode?",
+    );
+  }
+
+  use(subscription.getPromise());
+
+  const getCurrentValue = () => {
+    const value = subscription.getCurrentValue();
+
+    if (!value.$isLoaded) {
+      throw new Error("Account must be loaded in a suspense context");
+    }
+
+    return value;
+  };
+
+  return useSyncExternalStoreWithSelector<Loaded<A, R>, TSelectorReturn>(
     React.useCallback(
       (callback) => {
         if (!subscription) {

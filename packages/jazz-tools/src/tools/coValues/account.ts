@@ -28,6 +28,7 @@ import {
   ID,
   InstanceOrPrimitiveOfSchema,
   MaybeLoaded,
+  Settled,
   Profile,
   Ref,
   type RefEncoded,
@@ -131,9 +132,7 @@ export class Account extends CoValueBase implements CoValue {
     valueID: string,
     inviteSecret: InviteSecret,
     coValueClass?: S,
-  ): Promise<
-    MaybeLoaded<Resolved<InstanceOfSchemaCoValuesMaybeLoaded<S>, true>>
-  > {
+  ): Promise<Settled<Resolved<InstanceOfSchemaCoValuesMaybeLoaded<S>, true>>> {
     if (!this.$jazz.isLocalNodeOwner) {
       throw new Error("Only a controlled account can accept invites");
     }
@@ -274,7 +273,13 @@ export class Account extends CoValueBase implements CoValue {
       creationProps: { name: string };
       onCreate?: (account: A, worker: Account) => Promise<void>;
     },
-  ) {
+  ): Promise<{
+    credentials: {
+      accountID: string;
+      accountSecret: AgentSecret;
+    };
+    account: A;
+  }> {
     const crypto = worker.$jazz.localNode.crypto;
 
     const connectedPeers = cojsonInternals.connectedPeers(
@@ -290,6 +295,11 @@ export class Account extends CoValueBase implements CoValue {
       crypto,
       peers: [connectedPeers[0]],
     });
+
+    const credentials = {
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+    };
 
     // Load the worker inside the account node
     const loadedWorker = await Account.load(worker.$jazz.id, {
@@ -315,7 +325,7 @@ export class Account extends CoValueBase implements CoValue {
     // Close the account node, to avoid leaking memory
     account.$jazz.localNode.gracefulShutdown();
 
-    return createdAccount;
+    return { credentials, account: createdAccount };
   }
 
   static fromNode<A extends Account>(
@@ -380,7 +390,7 @@ export class Account extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<A, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<A, R>>> {
+  ): Promise<Settled<Resolved<A, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 

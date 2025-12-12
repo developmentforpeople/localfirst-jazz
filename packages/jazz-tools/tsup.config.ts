@@ -43,13 +43,22 @@ export default defineConfig([
       index: "src/expo/index.ts",
       testing: "src/expo/testing.ts",
       crypto: "src/expo/crypto.ts",
+      polyfills: "src/react-native-core/polyfills/index.js",
     },
     outDir: "dist/expo",
+    external: [
+      "jazz-tools",
+      "readable-stream",
+      "@azure/core-asynciterator-polyfill",
+      "react-native-get-random-values",
+      "react-native-fast-encoder",
+    ],
   },
   {
     ...cfg,
     entry: {
       index: "src/inspector/index.tsx",
+      standalone: "src/inspector/standalone.tsx",
     },
     outDir: "dist/inspector",
     esbuildOptions: (options) => {
@@ -107,8 +116,16 @@ export default defineConfig([
       index: "src/react-native/index.ts",
       testing: "src/react-native/testing.ts",
       crypto: "src/react-native/crypto.ts",
+      polyfills: "src/react-native-core/polyfills/index.js",
     },
     outDir: "dist/react-native",
+    external: [
+      "jazz-tools",
+      "readable-stream",
+      "@azure/core-asynciterator-polyfill",
+      "react-native-get-random-values",
+      "react-native-fast-encoder",
+    ],
   },
   {
     ...cfg,
@@ -116,6 +133,7 @@ export default defineConfig([
       index: "src/react-native-core/index.ts",
       testing: "src/react-native-core/testing.tsx",
       crypto: "src/react-native-core/crypto/index.ts",
+      "crypto/RNCrypto": "src/react-native-core/crypto/RNCrypto.ts",
     },
     outDir: "dist/react-native-core",
   },
