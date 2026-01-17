@@ -1,4 +1,4 @@
-import { LocalNode, Peer, RawAccountID } from "cojson";
+import { LocalNode, Peer } from "cojson";
 import { getIndexedDBStorage } from "cojson-storage-indexeddb";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
@@ -23,6 +23,7 @@ import {
 import { createJazzContext } from "jazz-tools";
 import { StorageConfig, getStorageOptions } from "./storageOptions.js";
 import { setupInspector } from "./utils/export-account-inspector.js";
+import { getBrowserLockSessionProvider } from "./provideBrowserLockSession/index.js";
 
 // DFP added export
 export { getStorageOptions };
@@ -67,6 +68,7 @@ export async function setupPeers(options: BaseBrowserContextOptions) {
       connected: () => false,
       toggleNetwork: () => {},
       peers,
+      syncWhen: options.sync.when,
       storage,
       setNode: () => {},
       crypto,
@@ -117,6 +119,7 @@ export async function setupPeers(options: BaseBrowserContextOptions) {
       return wsPeer.connected;
     },
     peers,
+    syncWhen: options.sync.when,
     storage,
     setNode,
     crypto,
@@ -129,6 +132,7 @@ export async function createJazzBrowserGuestContext(
   const {
     toggleNetwork,
     peers,
+    syncWhen,
     setNode,
     crypto,
     storage,
@@ -139,6 +143,7 @@ export async function createJazzBrowserGuestContext(
   const context = await createAnonymousJazzContext({
     crypto,
     peers,
+    syncWhen,
     storage,
   });
 
@@ -181,6 +186,7 @@ export async function createJazzBrowserContext<
   const {
     toggleNetwork,
     peers,
+    syncWhen,
     setNode,
     crypto,
     storage,
@@ -210,11 +216,12 @@ export async function createJazzBrowserContext<
     credentials: options.credentials,
     newAccountProps: options.newAccountProps,
     peers,
+    syncWhen,
     storage,
     crypto,
     defaultProfileName: options.defaultProfileName,
     AccountSchema: options.AccountSchema,
-    sessionProvider: provideBrowserLockSession,
+    sessionProvider: getBrowserLockSessionProvider(),
     authSecretStorage: options.authSecretStorage,
   });
 
@@ -243,66 +250,6 @@ export async function createJazzBrowserContext<
 export type SessionProvider = (
   accountID: ID<Account> | AgentID,
 ) => Promise<SessionID>;
-
-export function provideBrowserLockSession(
-  accountID: ID<Account> | AgentID,
-  crypto: CryptoProvider,
-) {
-  if (typeof navigator === "undefined" || !navigator.locks?.request) {
-    // Fallback to random session ID for each tab session
-    return Promise.resolve({
-      sessionID: crypto.newRandomSessionID(accountID as RawAccountID | AgentID),
-      sessionDone: () => {},
-    });
-  }
-
-  let sessionDone!: () => void;
-  const donePromise = new Promise<void>((resolve) => {
-    sessionDone = resolve;
-  });
-
-  let resolveSession: (sessionID: SessionID) => void;
-  const sessionPromise = new Promise<SessionID>((resolve) => {
-    resolveSession = resolve;
-  });
-
-  void (async function () {
-    for (let idx = 0; idx < 100; idx++) {
-      // To work better around StrictMode
-      for (let retry = 0; retry < 2; retry++) {
-        // console.debug("Trying to get lock", accountID + "_" + idx);
-        const sessionFinishedOrNoLock = await navigator.locks.request(
-          accountID + "_" + idx,
-          { ifAvailable: true },
-          async (lock) => {
-            if (!lock) return "noLock";
-
-            const sessionID =
-              localStorage.getItem(accountID + "_" + idx) ||
-              crypto.newRandomSessionID(accountID as RawAccountID | AgentID);
-            localStorage.setItem(accountID + "_" + idx, sessionID);
-
-            resolveSession(sessionID as SessionID);
-
-            await donePromise;
-            console.log("Done with lock", accountID + "_" + idx, sessionID);
-            return "sessionFinished";
-          },
-        );
-
-        if (sessionFinishedOrNoLock === "sessionFinished") {
-          return;
-        }
-      }
-    }
-    throw new Error("Couldn't get lock on session after 100x2 tries");
-  })();
-
-  return sessionPromise.then((sessionID) => ({
-    sessionID,
-    sessionDone,
-  }));
-}
 
 /** @category Invite Links */
 export function createInviteLink<C extends CoValue>(

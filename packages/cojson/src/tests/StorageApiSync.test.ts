@@ -578,6 +578,55 @@ describe("StorageApiSync", () => {
       const mapOnNode = await loadCoValueOrFail(node, map.id);
       expect(mapOnNode.get("test")).toEqual("value");
     });
+
+    test("should load dependencies again if they were unmounted", async () => {
+      const { fixturesNode, dbPath } = await createFixturesNode();
+      const { node, storage } = await createTestNode(dbPath);
+
+      // Create a group and a map owned by that group
+      const group = fixturesNode.createGroup();
+      group.addMember("everyone", "reader");
+      const map = group.createMap({ test: "value" });
+      await group.core.waitForSync();
+      await map.core.waitForSync();
+
+      const callback = vi.fn((content) =>
+        node.syncManager.handleNewContent(content, "storage"),
+      );
+      const done = vi.fn();
+
+      // Load the map (and its group)
+      await storage.load(map.id, callback, done);
+      callback.mockClear();
+      done.mockClear();
+
+      // Unmount the map and its group
+      storage.onCoValueUnmounted(map.id);
+      storage.onCoValueUnmounted(group.id);
+
+      // Load the map. The group dependency should be loaded again
+      await storage.load(map.id, callback, done);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(callback).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          id: group.id,
+        }),
+      );
+      expect(callback).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          id: map.id,
+        }),
+      );
+
+      expect(done).toHaveBeenCalledWith(true);
+
+      node.setStorage(storage);
+      const mapOnNode = await loadCoValueOrFail(node, map.id);
+      expect(mapOnNode.get("test")).toEqual("value");
+    });
   });
 
   describe("waitForSync", () => {
@@ -617,6 +666,138 @@ describe("StorageApiSync", () => {
       const { storage } = await createTestNode();
 
       expect(() => storage.close()).not.toThrow();
+    });
+  });
+
+  describe("loadKnownState", () => {
+    test("should return correct knownState structure for existing CoValue", async () => {
+      const { fixturesNode, dbPath } = await createFixturesNode();
+      const { storage } = await createTestNode(dbPath);
+
+      // Create a group to have data in the database
+      const group = fixturesNode.createGroup();
+      group.addMember("everyone", "reader");
+      await group.core.waitForSync();
+
+      const result = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.id).toBe(group.id);
+      expect(result?.header).toBe(true);
+      expect(result?.sessions).toEqual(group.core.knownState().sessions);
+    });
+
+    test("should return undefined for non-existent CoValue", async () => {
+      const { storage } = await createTestNode();
+
+      const result = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState("co_nonexistent" as any, resolve);
+        },
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    test("should handle CoValue with no sessions (header only)", async () => {
+      const { fixturesNode, dbPath } = await createFixturesNode();
+      const { storage } = await createTestNode(dbPath);
+
+      // Create a CoValue with just a header (no transactions yet)
+      const coValue = fixturesNode.createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...crypto.createdNowUnique(),
+      });
+      await coValue.waitForSync();
+
+      const result = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(coValue.id, resolve);
+        },
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.id).toBe(coValue.id);
+      expect(result?.header).toBe(true);
+      // The sessions should have one entry with lastIdx = 0 (just header)
+      expect(Object.keys(result?.sessions || {}).length).toBe(0);
+    });
+
+    test("should handle CoValue with multiple sessions", async () => {
+      const { fixturesNode, dbPath } = await createFixturesNode();
+      const { fixturesNode: fixturesNode2 } = await createFixturesNode(dbPath);
+      const { storage } = await createTestNode(dbPath);
+
+      // Create a CoValue and have two nodes make transactions
+      const coValue = fixturesNode.createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...crypto.createdNowUnique(),
+      });
+
+      coValue.makeTransaction([{ key1: "value1" }], "trusting");
+      await coValue.waitForSync();
+
+      const coValueOnNode2 = await loadCoValueOrFail(
+        fixturesNode2,
+        coValue.id as CoID<RawCoMap>,
+      );
+
+      coValueOnNode2.set("key2", "value2", "trusting");
+      await coValueOnNode2.core.waitForSync();
+
+      const result = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(coValue.id, resolve);
+        },
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.id).toBe(coValue.id);
+      expect(result?.header).toBe(true);
+      // Should have two sessions
+      expect(Object.keys(result?.sessions || {}).length).toBe(2);
+      // Verify sessions match the expected state
+      expect(result?.sessions).toEqual(
+        coValueOnNode2.core.knownState().sessions,
+      );
+    });
+
+    test("should use cache when knownState is cached", async () => {
+      const { fixturesNode, dbPath } = await createFixturesNode();
+      const { storage } = await createTestNode(dbPath);
+
+      // Create a group to have data in the database
+      const group = fixturesNode.createGroup();
+      group.addMember("everyone", "reader");
+      await group.core.waitForSync();
+
+      // First call should hit the database and cache the result
+      const result1 = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result1).toBeDefined();
+      expect(result1?.id).toBe(group.id);
+      expect(result1?.header).toBe(true);
+
+      // Second call should return from cache
+      const result2 = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result2).toEqual(result1);
     });
   });
 });

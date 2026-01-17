@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { Project, MyAppAccount } from "./schema";
+import { useMemo, useState } from "react";
+import { Project, MyAppAccount, Task } from "./schema";
 // #region Basic
 import { useCoState } from "jazz-tools/react";
 
@@ -158,5 +158,86 @@ function ProfileName() {
   });
 
   return <div>{profileName}</div>;
+}
+// #endregion
+
+// #region Suspense
+import { useSuspenseCoState } from "jazz-tools/react";
+
+function ProjectViewSuspense({ projectId }: { projectId: string }) {
+  // Subscribe to a project and resolve its tasks
+  const project = useSuspenseCoState(Project, projectId, {
+    resolve: { tasks: { $each: true } }, // Tell Jazz to load each task in the list
+  });
+
+  // [!code --:12]
+  // We don't need to validate the loading state any more
+  // useSuspenseCoState cannot return anything other than a loaded CoValue.
+  if (!project.$isLoaded) {
+    switch (project.$jazz.loadingState) {
+      // @ts-expect-error Code is showing diffed out
+      case "unauthorized":
+        return "Project not accessible";
+      // @ts-expect-error Code is showing diffed out
+      case "unavailable":
+        return "Project not found";
+      // @ts-expect-error Code is showing diffed out
+      case "loading":
+        return "Loading project...";
+    }
+  }
+
+  return (
+    <div>
+      <h1>{project.name}</h1>
+      <ul>
+        {project.tasks.map((task) => (
+          <li key={task.$jazz.id}>{task.title}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+// #endregion
+
+// #region ProjectViewWithPagination
+import { useSuspenseCoStates } from "jazz-tools/react";
+
+const TASK_PAGE_SIZE = 20;
+
+function ProjectViewWithPagination({ projectId }: { projectId: string }) {
+  // Load the task list, but not the tasks themselves
+  const project = useSuspenseCoState(Project, projectId, {
+    resolve: { tasks: true },
+  });
+  const [taskCount, setTaskCount] = useState(TASK_PAGE_SIZE);
+  
+  // Get the ids of the tasks to be loaded
+  const taskIds = Array.from(project.tasks.$jazz.refs)
+    .slice(0, taskCount)
+    .map(ref => ref.id);
+  
+  // Load the tasks for the current page
+  const tasks = useSuspenseCoStates(Task, taskIds);
+
+  const loadMoreTasks = () => {
+    setTaskCount(taskCount => taskCount + TASK_PAGE_SIZE);
+  };
+
+  const hasMoreTasks = taskCount < project.tasks.length;
+
+  return (
+    <div>
+      <h1>{project.name}</h1>
+      <ul>
+        {tasks.map((task) => (
+          <li key={task.$jazz.id}>{task.title}</li>
+        ))}
+      </ul>
+      {hasMoreTasks && (
+        <button onClick={loadMoreTasks}>Load more tasks</button>
+      )}
+    </div>
+  );
 }
 // #endregion

@@ -66,6 +66,8 @@ export {
   createUnloadedCoValue,
   unstable_loadUnique,
   getUnloadedCoValueWithoutId,
+  setDefaultSchemaPermissions,
+  getJazzErrorType,
 } from "./internal.js";
 
 export {
@@ -100,7 +102,8 @@ export {
   createJazzContextFromExistingCredentials,
   createJazzContextForNewAccount,
   createJazzContext,
-  randomSessionProvider,
+  SessionProvider,
+  MockSessionProvider,
   type AuthResult,
   type Credentials,
   type JazzContextWithAccount,
@@ -141,3 +144,8 @@ export * from "./ssr/index.js";
 export { captureStack } from "./subscribe/errorReporting.js";
 
 export * as jazzConfig from "./config.js";
+
+export {
+  JazzMessageChannel as experimental_JazzMessageChannel,
+  type JazzMessageChannelExposeOptions,
+} from "../worker/JazzMessageChannel.js";

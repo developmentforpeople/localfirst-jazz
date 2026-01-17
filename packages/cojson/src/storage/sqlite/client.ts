@@ -4,8 +4,9 @@ import type {
 } from "../../coValueCore/verifiedState.js";
 import type { Signature } from "../../crypto/crypto.js";
 import type { RawCoID, SessionID } from "../../exports.js";
+import type { CoValueKnownState } from "../../knownState.js";
+import type { PeerID } from "../../sync.js";
 import { logger } from "../../logger.js";
-import type { NewContentMessage } from "../../sync.js";
 import type {
   DBClientInterfaceSync,
   DBTransactionInterfaceSync,
@@ -193,5 +194,65 @@ export class SQLiteClient
   transaction(operationsCallback: (tx: DBTransactionInterfaceSync) => unknown) {
     this.db.transaction(() => operationsCallback(this));
     return undefined;
+  }
+
+  getUnsyncedCoValueIDs(): RawCoID[] {
+    const rows = this.db.query<{ co_value_id: RawCoID }>(
+      "SELECT DISTINCT co_value_id FROM unsynced_covalues",
+      [],
+    ) as { co_value_id: RawCoID }[];
+    return rows.map((row) => row.co_value_id);
+  }
+
+  trackCoValuesSyncState(
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+  ): void {
+    for (const update of updates) {
+      if (update.synced) {
+        this.db.run(
+          "DELETE FROM unsynced_covalues WHERE co_value_id = ? AND peer_id = ?",
+          [update.id, update.peerId],
+        );
+      } else {
+        this.db.run(
+          "INSERT OR REPLACE INTO unsynced_covalues (co_value_id, peer_id) VALUES (?, ?)",
+          [update.id, update.peerId],
+        );
+      }
+    }
+  }
+
+  stopTrackingSyncState(id: RawCoID): void {
+    this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [id]);
+  }
+
+  getCoValueKnownState(coValueId: string): CoValueKnownState | undefined {
+    // First check if the CoValue exists
+    const coValueRow = this.db.get<{ rowID: number }>(
+      "SELECT rowID FROM coValues WHERE id = ?",
+      [coValueId],
+    );
+
+    if (!coValueRow) {
+      return undefined;
+    }
+
+    // Get all session counters without loading transactions
+    const sessions = this.db.query<{ sessionID: SessionID; lastIdx: number }>(
+      "SELECT sessionID, lastIdx FROM sessions WHERE coValue = ?",
+      [coValueRow.rowID],
+    );
+
+    const knownState: CoValueKnownState = {
+      id: coValueId as RawCoID,
+      header: true,
+      sessions: {},
+    };
+
+    for (const session of sessions) {
+      knownState.sessions[session.sessionID] = session.lastIdx;
+    }
+
+    return knownState;
   }
 }

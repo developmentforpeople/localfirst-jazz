@@ -53,8 +53,11 @@ export * from "./implementation/zodSchema/typeConverters/InstanceOfSchemaCoValue
 export * from "./implementation/zodSchema/typeConverters/CoFieldSchemaInit.js";
 export * from "./implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.js";
 export * from "./implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
+export * from "./implementation/zodSchema/schemaPermissions.js";
 export * from "./coValues/extensions/imageDef.js";
 
 export * from "./implementation/ContextManager.js";
+
+export * from "./subscribe/JazzError.js";
 
 import "./implementation/devtoolsFormatters.js";

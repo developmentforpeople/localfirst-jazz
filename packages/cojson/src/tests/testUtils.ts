@@ -13,16 +13,18 @@ import {
   AnyRawCoValue,
   type CoID,
   type CoValueCore,
+  MessageChannelLike,
+  MessagePortLike,
   type RawAccount,
   RawAccountID,
   RawCoMap,
   type RawCoValue,
   StorageAPI,
 } from "../exports.js";
-import type { SessionID } from "../ids.js";
+import type { RawCoID, SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
-import type { Peer, SyncMessage } from "../sync.js";
+import type { Peer, SyncMessage, SyncWhen } from "../sync.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { createAsyncStorage, createSyncStorage } from "./testStorage.js";
@@ -187,8 +189,8 @@ export function newGroupHighLevel() {
 
   const group = node.createGroup();
 
-  onTestFinished(() => {
-    node.gracefulShutdown();
+  onTestFinished(async () => {
+    await node.gracefulShutdown();
   });
   return { admin, node, group };
 }
@@ -272,12 +274,11 @@ export function blockMessageTypeOnOutgoingPeer(
   },
 ) {
   const push = peer.outgoing.push;
-  const pushSpy = vi.spyOn(peer.outgoing, "push");
 
   const blockedMessages: SyncMessage[] = [];
   const blockedIds = new Set<string>();
 
-  pushSpy.mockImplementation(async (msg) => {
+  peer.outgoing.push = async (msg) => {
     if (
       typeof msg === "object" &&
       msg.action === messageType &&
@@ -288,9 +289,8 @@ export function blockMessageTypeOnOutgoingPeer(
       blockedIds.add(msg.id);
       return Promise.resolve();
     }
-
     return push.call(peer.outgoing, msg);
-  });
+  };
 
   return {
     blockedMessages,
@@ -300,7 +300,9 @@ export function blockMessageTypeOnOutgoingPeer(
       }
       blockedMessages.length = 0;
     },
-    unblock: () => pushSpy.mockRestore(),
+    unblock: () => {
+      peer.outgoing.push = push;
+    },
   };
 }
 
@@ -449,13 +451,14 @@ export function setupTestNode(
     isSyncServer?: boolean;
     connected?: boolean;
     secret?: AgentSecret;
+    syncWhen?: SyncWhen;
   } = {},
 ) {
   const [admin, session] = opts.secret
     ? agentAndSessionIDFromSecret(opts.secret)
     : randomAgentAndSessionID();
 
-  let node = new LocalNode(admin.agentSecret, session, Crypto);
+  let node = new LocalNode(admin.agentSecret, session, Crypto, opts.syncWhen);
 
   if (opts.isSyncServer) {
     syncServer.current = node;
@@ -516,8 +519,8 @@ export function setupTestNode(
     connectToSyncServer();
   }
 
-  onTestFinished(() => {
-    node.gracefulShutdown();
+  onTestFinished(async () => {
+    await node.gracefulShutdown();
   });
 
   const ctx = {
@@ -525,9 +528,14 @@ export function setupTestNode(
     connectToSyncServer,
     addStorage,
     addAsyncStorage,
-    restart: () => {
-      node.gracefulShutdown();
-      ctx.node = node = new LocalNode(admin.agentSecret, session, Crypto);
+    restart: async () => {
+      await node.gracefulShutdown();
+      ctx.node = node = new LocalNode(
+        admin.agentSecret,
+        session,
+        Crypto,
+        opts.syncWhen,
+      );
 
       if (opts.isSyncServer) {
         syncServer.current = node;
@@ -646,8 +654,8 @@ export async function setupTestAccount(
     connectToSyncServer();
   }
 
-  onTestFinished(() => {
-    ctx.node.gracefulShutdown();
+  onTestFinished(async () => {
+    await ctx.node.gracefulShutdown();
   });
 
   return {
@@ -673,10 +681,22 @@ export async function setupTestAccount(
   };
 }
 
+export type LazyLoadMessage = {
+  action: "lazyLoad";
+  id: RawCoID;
+};
+
+export type LazyLoadResultMessage = {
+  action: "lazyLoadResult";
+  id: RawCoID;
+  header: boolean;
+  sessions: { [sessionID: string]: number };
+};
+
 export type SyncTestMessage = {
   from: string;
   to: string;
-  msg: SyncMessage;
+  msg: SyncMessage | LazyLoadMessage | LazyLoadResultMessage;
 };
 
 export function connectedPeersWithMessagesTracking(opts: {
@@ -792,4 +812,81 @@ export function fillCoMapWithLargeData(map: RawCoMap) {
   }
 
   return map;
+}
+
+// ============================================================================
+// MessageChannel Test Helpers
+// ============================================================================
+
+/**
+ * Type guard to check if a message is a SyncMessage.
+ */
+export function isSyncMessage(msg: unknown): msg is SyncMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "action" in msg &&
+    typeof (msg as { action: unknown }).action === "string"
+  );
+}
+
+/**
+ * Creates a MessageChannel that logs all sync messages exchanged between ports.
+ * Similar to connectedPeersWithMessagesTracking but for MessageChannel.
+ */
+export function createTrackedMessageChannel(opts: {
+  port1Name?: string;
+  port2Name?: string;
+}) {
+  const { port1, port2 } = new MessageChannel();
+  const port1Name = opts.port1Name ?? "port1";
+  const port2Name = opts.port2Name ?? "port2";
+
+  // Wrap port1.postMessage to log messages
+  const originalPort1PostMessage = port1.postMessage.bind(port1);
+  port1.postMessage = (message, transfer) => {
+    if (isSyncMessage(message)) {
+      SyncMessagesLog.add({
+        from: port1Name,
+        to: port2Name,
+        msg: message,
+      });
+    }
+
+    originalPort1PostMessage(message, transfer);
+  };
+
+  // Wrap port2.postMessage to log messages
+  const originalPort2PostMessage = port2.postMessage.bind(port2);
+  port2.postMessage = (message, transfer) => {
+    if (isSyncMessage(message)) {
+      SyncMessagesLog.add({
+        from: port2Name,
+        to: port1Name,
+        msg: message,
+      });
+    }
+
+    originalPort2PostMessage(message, transfer);
+  };
+
+  return { port1, port2 };
+}
+
+/**
+ * Creates a mock worker target that simulates receiving a port
+ * and calling a callback with the received port (simulating a connection handshake).
+ */
+export function createMockWorkerWithAccept(
+  onPortReceived: (port: MessagePortLike) => Promise<void>,
+) {
+  return {
+    postMessage: vi.fn().mockImplementation((data, transfer) => {
+      if (data?.type === "jazz:port" && transfer?.[0]) {
+        const port = transfer[0] as MessagePortLike;
+        // Simulate the worker receiving the port and calling accept
+        onPortReceived(port);
+      }
+    }),
+  };
 }

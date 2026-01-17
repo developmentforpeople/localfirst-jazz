@@ -1,5 +1,84 @@
 # cojson
 
+## 0.19.22
+
+### Patch Changes
+
+- 3b70482: Wait for CoValues' dependencies to be garbage-collected before collecting them. This makes accounts and groups safe to be collected.
+- 6078ea5: Wait for CoValues to be synced before garbage-collecting them
+  - cojson-core-wasm@0.19.22
+  - cojson-core-rn@0.19.22
+  - cojson-core-napi@0.19.22
+
+## 0.19.19
+
+### Patch Changes
+
+- 83f84ca: Resume interrupted CoValue sync on app restart (without requiring CoValues to be manually reloaded)
+  - cojson-core-wasm@0.19.19
+  - cojson-core-rn@0.19.19
+  - cojson-core-napi@0.19.19
+
+## 0.19.18
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.18
+- cojson-core-rn@0.19.18
+- cojson-core-napi@0.19.18
+
+## 0.19.17
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.17
+- cojson-core-rn@0.19.17
+- cojson-core-napi@0.19.17
+
+## 0.19.16
+
+### Patch Changes
+
+- 265d0e9: Improved sync timeout error messages to include known state, peer state, and any error information when waiting for sync times out
+  - cojson-core-wasm@0.19.16
+  - cojson-core-rn@0.19.16
+  - cojson-core-napi@0.19.16
+
+## 0.19.15
+
+### Patch Changes
+
+- 71ed9d6: Fixed an issue where spreading the uniqueness object when creating CoValues could introduce unexpected properties into the header
+  - cojson-core-wasm@0.19.15
+  - cojson-core-rn@0.19.15
+  - cojson-core-napi@0.19.15
+
+## 0.19.14
+
+### Patch Changes
+
+- Updated dependencies [41d4c52]
+- Updated dependencies [241123b]
+  - cojson-core-rn@0.19.14
+  - cojson-core-napi@0.19.14
+  - cojson-core-wasm@0.19.14
+
+## 0.19.13
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.13
+- cojson-core-rn@0.19.13
+- cojson-core-napi@0.19.13
+
+## 0.19.12
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.12
+- cojson-core-rn@0.19.12
+- cojson-core-napi@0.19.12
+
 ## 0.19.11
 
 ### Patch Changes
@@ -286,6 +365,7 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
+
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -306,6 +386,7 @@
 - 2ddf4d9: Introducing version control APIs, unstable_branch and unstable_merge
 
   Flagged as unstable because branch & merge scope & propagation needs to be validated.
+
   - cojson-core-wasm@0.18.13
 
 ## 0.18.12
@@ -521,6 +602,7 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
+
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

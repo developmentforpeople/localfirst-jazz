@@ -19,7 +19,7 @@ import {
 } from "../implementation/ContextManager";
 import {
   createJazzContext,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "../implementation/createContext";
 import {
   CoValueFromRaw,
@@ -37,6 +37,7 @@ import { SubscriptionCache } from "../subscribe/SubscriptionCache";
 import { createAsyncStorage, getDbPath } from "./testStorage";
 
 const Crypto = await WasmCrypto.create();
+const randomSessionProvider = new MockSessionProvider();
 
 class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
   Acc,
@@ -155,6 +156,56 @@ describe("ContextManager", () => {
     await manager.authenticate(credentials);
 
     expect(getCurrentValue().me.$jazz.id).toBe(credentials.accountID);
+  });
+
+  test("authenticating twice with the same credentials should not create a new session", async () => {
+    const account = await createJazzTestAccount();
+
+    // First create an initial context to get credentials
+    await manager.createContext({});
+
+    const credentials = {
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+      provider: "test",
+    };
+
+    // Authenticate with those credentials
+    await manager.authenticate(credentials);
+
+    const firstSessionID = getCurrentValue().me.$jazz.sessionID;
+
+    await manager.authenticate(credentials);
+
+    const secondSessionID = getCurrentValue().me.$jazz.sessionID;
+
+    expect(getCurrentValue().me.$jazz.id).toBe(credentials.accountID);
+    expect(secondSessionID).toBe(firstSessionID);
+  });
+
+  test("authenticating twice with the same credentials should create a new session if forced", async () => {
+    const account = await createJazzTestAccount();
+
+    // First create an initial context to get credentials
+    await manager.createContext({});
+
+    const credentials = {
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+      provider: "test",
+    };
+
+    // Authenticate with those credentials
+    await manager.authenticate(credentials);
+
+    const firstSessionID = getCurrentValue().me.$jazz.sessionID;
+
+    await manager.authenticate(credentials, true);
+
+    const secondSessionID = getCurrentValue().me.$jazz.sessionID;
+
+    expect(getCurrentValue().me.$jazz.id).toBe(credentials.accountID);
+    expect(secondSessionID).not.toBe(firstSessionID);
   });
 
   test("calls onLogOut callback when logging out", async () => {
@@ -302,11 +353,14 @@ describe("ContextManager", () => {
       >
     ).me;
 
-    await customManager.authenticate({
-      accountID: account.$jazz.id,
-      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
-      provider: "test",
-    });
+    await customManager.authenticate(
+      {
+        accountID: account.$jazz.id,
+        accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+        provider: "test",
+      },
+      true,
+    );
 
     // The storage should be closed and set to undefined
     expect(prevContextNode.storage).toBeUndefined();
@@ -406,11 +460,14 @@ describe("ContextManager", () => {
       >
     ).me;
 
-    await customManager.authenticate({
-      accountID: account.$jazz.id,
-      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
-      provider: "test",
-    });
+    await customManager.authenticate(
+      {
+        accountID: account.$jazz.id,
+        accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+        provider: "test",
+      },
+      true,
+    );
 
     const me = await CustomAccount.getMe().$jazz.ensureLoaded({
       resolve: { root: true },
@@ -603,6 +660,22 @@ describe("ContextManager", () => {
       expect(onAnonymousAccountDiscarded).toHaveBeenCalledTimes(1);
     });
 
+    test("prevents concurrent logout attempts", async () => {
+      const onLogOut = vi.fn();
+      await manager.createContext({ onLogOut });
+
+      // Start multiple concurrent logout attempts
+      const promises = [];
+      for (let i = 0; i < 5; i++) {
+        promises.push(manager.logOut());
+      }
+
+      await Promise.all(promises);
+
+      // onLogOut should only be called once despite multiple logOut calls
+      expect(onLogOut).toHaveBeenCalledTimes(1);
+    });
+
     test("allows authentication after logout", async () => {
       const account = await createJazzTestAccount();
       const onAnonymousAccountDiscarded = vi.fn();
@@ -718,12 +791,15 @@ describe("ContextManager", () => {
       const promises = [];
       for (let i = 0; i < 3; i++) {
         promises.push(
-          customManager.authenticate({
-            accountID: account.$jazz.id,
-            accountSecret:
-              account.$jazz.localNode.getCurrentAgent().agentSecret,
-            provider: "test",
-          }),
+          customManager.authenticate(
+            {
+              accountID: account.$jazz.id,
+              accountSecret:
+                account.$jazz.localNode.getCurrentAgent().agentSecret,
+              provider: "test",
+            },
+            true,
+          ),
         );
       }
 

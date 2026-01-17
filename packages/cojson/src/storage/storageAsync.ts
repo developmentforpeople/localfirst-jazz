@@ -10,7 +10,7 @@ import {
   logger,
 } from "../exports.js";
 import { StoreQueue } from "../queue/StoreQueue.js";
-import { NewContentMessage } from "../sync.js";
+import { NewContentMessage, type PeerID } from "../sync.js";
 import {
   CoValueKnownState,
   emptyKnownState,
@@ -34,16 +34,71 @@ import type {
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
 
-  private loadedCoValues = new Set<RawCoID>();
+  /**
+   * Keeps track of CoValues that are in memory, to avoid reloading them from storage
+   * when it isn't necessary
+   */
+  private inMemoryCoValues = new Set<RawCoID>();
+
+  // Track pending loads to deduplicate concurrent requests
+  private pendingKnownStateLoads = new Map<
+    string,
+    Promise<CoValueKnownState | undefined>
+  >();
 
   constructor(dbClient: DBClientInterfaceAsync) {
     this.dbClient = dbClient;
   }
 
-  knwonStates = new StorageKnownState();
+  knownStates = new StorageKnownState();
 
   getKnownState(id: string): CoValueKnownState {
-    return this.knwonStates.getKnownState(id);
+    return this.knownStates.getKnownState(id);
+  }
+
+  loadKnownState(
+    id: string,
+    callback: (knownState: CoValueKnownState | undefined) => void,
+  ): void {
+    // Check in-memory cache first
+    const cached = this.knownStates.getCachedKnownState(id);
+    if (cached) {
+      callback(cached);
+      return;
+    }
+
+    // Check if there's already a pending load for this ID (deduplication)
+    const pending = this.pendingKnownStateLoads.get(id);
+    if (pending) {
+      // Ensure callback is always called, even if pending fails unexpectedly
+      pending.then(callback, () => callback(undefined));
+      return;
+    }
+
+    // Start new load and track it for deduplication
+    const loadPromise = this.dbClient
+      .getCoValueKnownState(id)
+      .then((knownState) => {
+        if (knownState) {
+          // Cache for future use
+          this.knownStates.setKnownState(id, knownState);
+        }
+        return knownState;
+      })
+      .catch((err) => {
+        // Error handling contract:
+        // - Log warning
+        // - Behave like "not found" so callers can fall back (full load / load from peers)
+        logger.warn("Failed to load knownState from storage", { id, err });
+        return undefined;
+      })
+      .finally(() => {
+        // Remove from pending map after completion (success or failure)
+        this.pendingKnownStateLoads.delete(id);
+      });
+
+    this.pendingKnownStateLoads.set(id, loadPromise);
+    loadPromise.then(callback);
   }
 
   async load(
@@ -91,7 +146,7 @@ export class StorageApiAsync implements StorageAPI {
       }),
     );
 
-    const knownState = this.knwonStates.getKnownState(coValueRow.id);
+    const knownState = this.knownStates.getKnownState(coValueRow.id);
     knownState.header = true;
 
     for (const sessionRow of allCoValueSessions) {
@@ -102,7 +157,7 @@ export class StorageApiAsync implements StorageAPI {
       );
     }
 
-    this.loadedCoValues.add(coValueRow.id);
+    this.inMemoryCoValues.add(coValueRow.id);
 
     let contentMessage = createContentMessage(coValueRow.id, coValueRow.header);
 
@@ -169,11 +224,11 @@ export class StorageApiAsync implements StorageAPI {
       );
     }
 
-    this.knwonStates.handleUpdate(coValueRow.id, knownState);
+    this.knownStates.handleUpdate(coValueRow.id, knownState);
     done?.(true);
   }
 
-  async pushContentWithDependencies(
+  private async pushContentWithDependencies(
     coValueRow: StoredCoValueRow,
     contentMessage: NewContentMessage,
     pushCallback: (data: NewContentMessage) => void,
@@ -186,7 +241,7 @@ export class StorageApiAsync implements StorageAPI {
     const promises = [];
 
     for (const dependedOnCoValue of dependedOnCoValuesList) {
-      if (this.loadedCoValues.has(dependedOnCoValue)) {
+      if (this.inMemoryCoValues.has(dependedOnCoValue)) {
         continue;
       }
 
@@ -270,12 +325,12 @@ export class StorageApiAsync implements StorageAPI {
 
     if (!storedCoValueRowID) {
       const knownState = emptyKnownState(id as RawCoID);
-      this.knwonStates.setKnownState(id, knownState);
+      this.knownStates.setKnownState(id, knownState);
 
       return this.handleCorrection(knownState, correctionCallback);
     }
 
-    const knownState = this.knwonStates.getKnownState(id);
+    const knownState = this.knownStates.getKnownState(id);
     knownState.header = true;
 
     let invalidAssumptions = false;
@@ -313,7 +368,9 @@ export class StorageApiAsync implements StorageAPI {
       });
     }
 
-    this.knwonStates.handleUpdate(id, knownState);
+    this.inMemoryCoValues.add(id);
+
+    this.knownStates.handleUpdate(id, knownState);
 
     if (invalidAssumptions) {
       return this.handleCorrection(knownState, correctionCallback);
@@ -389,10 +446,32 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   waitForSync(id: string, coValue: CoValueCore) {
-    return this.knwonStates.waitForSync(id, coValue);
+    return this.knownStates.waitForSync(id, coValue);
+  }
+
+  trackCoValuesSyncState(
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+    done?: () => void,
+  ): void {
+    this.dbClient.trackCoValuesSyncState(updates).then(() => done?.());
+  }
+
+  getUnsyncedCoValueIDs(
+    callback: (unsyncedCoValueIDs: RawCoID[]) => void,
+  ): void {
+    this.dbClient.getUnsyncedCoValueIDs().then(callback);
+  }
+
+  stopTrackingSyncState(id: RawCoID): void {
+    this.dbClient.stopTrackingSyncState(id);
+  }
+
+  onCoValueUnmounted(id: RawCoID): void {
+    this.inMemoryCoValues.delete(id);
   }
 
   close() {
+    this.inMemoryCoValues.clear();
     return this.storeQueue.close();
   }
 }

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { RawCoID } from "../ids";
+import { PeerID } from "../sync";
 import { StorageAPI } from "../storage/types";
 import {
   createTestMetricReader,
@@ -35,7 +36,16 @@ function createMockStorage(
     ) => void;
     store?: (data: any, correctionCallback: any) => void;
     getKnownState?: (id: RawCoID) => any;
+    loadKnownState?: (id: string, callback: (knownState: any) => void) => void;
     waitForSync?: (id: string, coValue: any) => Promise<void>;
+    trackCoValuesSyncState?: (
+      operations: Array<{ id: RawCoID; peerId: PeerID; synced: boolean }>,
+    ) => void;
+    getUnsyncedCoValueIDs?: (
+      callback: (unsyncedCoValueIDs: RawCoID[]) => void,
+    ) => void;
+    stopTrackingSyncState?: (id: RawCoID) => void;
+    onCoValueUnmounted?: (id: RawCoID) => void;
     close?: () => Promise<unknown> | undefined;
   } = {},
 ): StorageAPI {
@@ -43,7 +53,13 @@ function createMockStorage(
     load: opts.load || vi.fn(),
     store: opts.store || vi.fn(),
     getKnownState: opts.getKnownState || vi.fn(),
+    loadKnownState:
+      opts.loadKnownState || vi.fn((id, callback) => callback(undefined)),
     waitForSync: opts.waitForSync || vi.fn().mockResolvedValue(undefined),
+    trackCoValuesSyncState: opts.trackCoValuesSyncState || vi.fn(),
+    getUnsyncedCoValueIDs: opts.getUnsyncedCoValueIDs || vi.fn(),
+    stopTrackingSyncState: opts.stopTrackingSyncState || vi.fn(),
+    onCoValueUnmounted: opts.onCoValueUnmounted || vi.fn(),
     close: opts.close || vi.fn().mockResolvedValue(undefined),
   };
 }

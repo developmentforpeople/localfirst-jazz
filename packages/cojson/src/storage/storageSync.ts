@@ -1,4 +1,3 @@
-import { UpDownCounter, metrics } from "@opentelemetry/api";
 import {
   createContentMessage,
   exceedsRecommendedSize,
@@ -10,7 +9,7 @@ import {
   type StorageAPI,
   logger,
 } from "../exports.js";
-import { NewContentMessage } from "../sync.js";
+import { NewContentMessage, type PeerID } from "../sync.js";
 import { StorageKnownState } from "./knownState.js";
 import {
   CoValueKnownState,
@@ -30,28 +29,57 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
+import {
+  ContentCallback,
+  StorageStreamingQueue,
+} from "../queue/StorageStreamingQueue.js";
+import { getPriorityFromHeader } from "../priority.js";
 
 export class StorageApiSync implements StorageAPI {
-  private streamingCounter: UpDownCounter;
-
   private readonly dbClient: DBClientInterfaceSync;
-  private loadedCoValues = new Set<RawCoID>();
+  /**
+   * Keeps track of CoValues that are in memory, to avoid reloading them from storage
+   * when it isn't necessary
+   */
+  private inMemoryCoValues = new Set<RawCoID>();
+
+  /**
+   * Queue for streaming content that will be pulled by SyncManager.
+   * Only used when content requires streaming (multiple chunks).
+   */
+  readonly streamingQueue: StorageStreamingQueue;
 
   constructor(dbClient: DBClientInterfaceSync) {
     this.dbClient = dbClient;
-    this.streamingCounter = metrics
-      .getMeter("cojson")
-      .createUpDownCounter(`jazz.storage.streaming`, {
-        description: "Number of streaming coValues",
-        unit: "1",
-      });
-    this.streamingCounter.add(0);
+    this.streamingQueue = new StorageStreamingQueue();
   }
 
-  knwonStates = new StorageKnownState();
+  knownStates = new StorageKnownState();
 
   getKnownState(id: string): CoValueKnownState {
-    return this.knwonStates.getKnownState(id);
+    return this.knownStates.getKnownState(id);
+  }
+
+  loadKnownState(
+    id: string,
+    callback: (knownState: CoValueKnownState | undefined) => void,
+  ): void {
+    // Check in-memory cache first
+    const cached = this.knownStates.getCachedKnownState(id);
+    if (cached) {
+      callback(cached);
+      return;
+    }
+
+    // Load from database
+    const knownState = this.dbClient.getCoValueKnownState(id);
+
+    if (knownState) {
+      // Cache for future use
+      this.knownStates.setKnownState(id, knownState);
+    }
+
+    callback(knownState);
   }
 
   async load(
@@ -62,7 +90,7 @@ export class StorageApiSync implements StorageAPI {
     await this.loadCoValue(id, callback, done);
   }
 
-  async loadCoValue(
+  loadCoValue(
     id: string,
     callback: (data: NewContentMessage) => void,
     done?: (found: boolean) => void,
@@ -89,34 +117,7 @@ export class StorageApiSync implements StorageAPI {
 
       if (signatures.length > 0) {
         contentStreaming = true;
-        signaturesBySession.set(sessionRow.sessionID, signatures);
       }
-    }
-
-    const knownState = this.knwonStates.getKnownState(coValueRow.id);
-    knownState.header = true;
-
-    for (const sessionRow of allCoValueSessions) {
-      setSessionCounter(
-        knownState.sessions,
-        sessionRow.sessionID,
-        sessionRow.lastIdx,
-      );
-    }
-
-    this.loadedCoValues.add(coValueRow.id);
-
-    let contentMessage = createContentMessage(coValueRow.id, coValueRow.header);
-
-    if (contentStreaming) {
-      this.streamingCounter.add(1);
-      contentMessage.expectContentUntil = knownState.sessions;
-    }
-
-    for (const sessionRow of allCoValueSessions) {
-      const signatures = signaturesBySession.get(sessionRow.sessionID) || [];
-
-      let idx = 0;
 
       const lastSignature = signatures[signatures.length - 1];
 
@@ -127,58 +128,127 @@ export class StorageApiSync implements StorageAPI {
         });
       }
 
-      for (const signature of signatures) {
-        const newTxsInSession = this.dbClient.getNewTransactionInSession(
-          sessionRow.rowID,
-          idx,
-          signature.idx,
-        );
+      signaturesBySession.set(sessionRow.sessionID, signatures);
+    }
 
-        collectNewTxs({
-          newTxsInSession,
-          contentMessage,
-          sessionRow,
-          firstNewTxIdx: idx,
-          signature: signature.signature,
-        });
+    const knownState = this.knownStates.getKnownState(coValueRow.id);
+    knownState.header = true;
 
-        idx = signature.idx + 1;
+    for (const sessionRow of allCoValueSessions) {
+      setSessionCounter(
+        knownState.sessions,
+        sessionRow.sessionID,
+        sessionRow.lastIdx,
+      );
+    }
 
-        if (signatures.length > 1) {
-          this.pushContentWithDependencies(
-            coValueRow,
-            contentMessage,
-            callback,
-          );
-          contentMessage = createContentMessage(
+    this.inMemoryCoValues.add(coValueRow.id);
+
+    const priority = getPriorityFromHeader(coValueRow.header);
+    const contentMessage = createContentMessage(
+      coValueRow.id,
+      coValueRow.header,
+    );
+
+    if (contentStreaming) {
+      contentMessage.expectContentUntil = knownState.sessions;
+    }
+
+    const streamingQueue: ContentCallback[] = [];
+
+    for (const sessionRow of allCoValueSessions) {
+      const signatures = signaturesBySession.get(sessionRow.sessionID);
+
+      if (!signatures) {
+        throw new Error("Signatures not found for session");
+      }
+
+      const firstSignature = signatures[0];
+
+      if (!firstSignature) {
+        continue;
+      }
+
+      this.loadSessionTransactions(
+        contentMessage,
+        sessionRow,
+        0,
+        firstSignature,
+      );
+
+      for (let i = 1; i < signatures.length; i++) {
+        const prevSignature = signatures[i - 1];
+
+        if (!prevSignature) {
+          throw new Error("Previous signature is nullish");
+        }
+
+        streamingQueue.push(() => {
+          const contentMessage = createContentMessage(
             coValueRow.id,
             coValueRow.header,
           );
 
-          // Introduce a delay to not block the main thread
-          // for the entire content processing
-          await new Promise((resolve) => setTimeout(resolve));
-        }
+          const signature = signatures[i];
+          if (!signature) throw new Error("Signature item is nullish");
+
+          this.loadSessionTransactions(
+            contentMessage,
+            sessionRow,
+            prevSignature.idx + 1,
+            signature,
+          );
+
+          if (Object.keys(contentMessage.new).length > 0) {
+            this.pushContentWithDependencies(
+              coValueRow,
+              contentMessage,
+              callback,
+            );
+          }
+        });
       }
     }
 
-    const hasNewContent = Object.keys(contentMessage.new).length > 0;
+    // Send the first chunk
+    this.pushContentWithDependencies(coValueRow, contentMessage, callback);
+    this.knownStates.handleUpdate(coValueRow.id, knownState);
 
-    // If there is no new content but steaming is not active, it's the case for a coValue with the header but no transactions
-    // For streaming the push has already been done in the loop above
-    if (hasNewContent || !contentStreaming) {
-      this.pushContentWithDependencies(coValueRow, contentMessage, callback);
+    // All priorities go through the queue (HIGH > MEDIUM > LOW)
+    for (const pushStreamingContent of streamingQueue) {
+      this.streamingQueue.push(pushStreamingContent, priority);
     }
 
-    if (contentStreaming) {
-      this.streamingCounter.add(-1);
+    // Trigger the queue to process the entries
+    if (streamingQueue.length > 0) {
+      this.streamingQueue.emit();
     }
 
-    this.knwonStates.handleUpdate(coValueRow.id, knownState);
     done?.(true);
   }
 
-  async pushContentWithDependencies(
+  private loadSessionTransactions(
+    contentMessage: NewContentMessage,
+    sessionRow: StoredSessionRow,
+    idx: number,
+    signature: Pick<SignatureAfterRow, "idx" | "signature">,
+  ) {
+    const newTxsInSession = this.dbClient.getNewTransactionInSession(
+      sessionRow.rowID,
+      idx,
+      signature.idx,
+    );
+
+    collectNewTxs({
+      newTxsInSession,
+      contentMessage,
+      sessionRow,
+      firstNewTxIdx: idx,
+      signature: signature.signature,
+    });
+  }
+
+  private async pushContentWithDependencies(
     coValueRow: StoredCoValueRow,
     contentMessage: NewContentMessage,
     pushCallback: (data: NewContentMessage) => void,
@@ -189,7 +259,7 @@ export class StorageApiSync implements StorageAPI {
     );
 
     for (const dependedOnCoValue of dependedOnCoValuesList) {
-      if (this.loadedCoValues.has(dependedOnCoValue)) {
+      if (this.inMemoryCoValues.has(dependedOnCoValue)) {
         continue;
       }
 
@@ -247,12 +317,12 @@ export class StorageApiSync implements StorageAPI {
 
     if (!storedCoValueRowID) {
       const knownState = emptyKnownState(id as RawCoID);
-      this.knwonStates.setKnownState(id, knownState);
+      this.knownStates.setKnownState(id, knownState);
 
       return this.handleCorrection(knownState, correctionCallback);
     }
 
-    const knownState = this.knwonStates.getKnownState(id);
+    const knownState = this.knownStates.getKnownState(id);
     knownState.header = true;
 
     let invalidAssumptions = false;
@@ -287,7 +357,9 @@ export class StorageApiSync implements StorageAPI {
       });
     }
 
-    this.knwonStates.handleUpdate(id, knownState);
+    this.inMemoryCoValues.add(id);
+
+    this.knownStates.handleUpdate(id, knownState);
 
     if (invalidAssumptions) {
       return this.handleCorrection(knownState, correctionCallback);
@@ -362,10 +434,34 @@ export class StorageApiSync implements StorageAPI {
   }
 
   waitForSync(id: string, coValue: CoValueCore) {
-    return this.knwonStates.waitForSync(id, coValue);
+    return this.knownStates.waitForSync(id, coValue);
+  }
+
+  trackCoValuesSyncState(
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+    done?: () => void,
+  ): void {
+    this.dbClient.trackCoValuesSyncState(updates);
+    done?.();
+  }
+
+  getUnsyncedCoValueIDs(
+    callback: (unsyncedCoValueIDs: RawCoID[]) => void,
+  ): void {
+    const ids = this.dbClient.getUnsyncedCoValueIDs();
+    callback(ids);
+  }
+
+  stopTrackingSyncState(id: RawCoID): void {
+    this.dbClient.stopTrackingSyncState(id);
+  }
+
+  onCoValueUnmounted(id: RawCoID): void {
+    this.inMemoryCoValues.delete(id);
   }
 
   close() {
+    this.inMemoryCoValues.clear();
     return undefined;
   }
 }

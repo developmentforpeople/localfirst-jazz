@@ -5,7 +5,9 @@ import type {
 import { Signature } from "../crypto/crypto.js";
 import type { CoValueCore, RawCoID, SessionID } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
+import type { PeerID } from "../sync.js";
 import { CoValueKnownState } from "../knownState.js";
+import { StorageStreamingQueue } from "../queue/StorageStreamingQueue.js";
 
 export type CorrectionCallback = (
   correction: CoValueKnownState,
@@ -25,9 +27,51 @@ export interface StorageAPI {
   ): void;
   store(data: NewContentMessage, handleCorrection: CorrectionCallback): void;
 
+  streamingQueue?: StorageStreamingQueue;
+
   getKnownState(id: string): CoValueKnownState;
 
   waitForSync(id: string, coValue: CoValueCore): Promise<void>;
+
+  /**
+   * Track multiple sync status updates.
+   * Does not guarantee the updates will be applied in order, so only one
+   * update per CoValue ID + Peer ID combination should be tracked at a time.
+   */
+  trackCoValuesSyncState(
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+    done?: () => void,
+  ): void;
+
+  /**
+   * Get all CoValue IDs that have at least one unsynced peer.
+   */
+  getUnsyncedCoValueIDs(
+    callback: (unsyncedCoValueIDs: RawCoID[]) => void,
+  ): void;
+
+  /**
+   * Stop tracking sync status for a CoValue (remove all peer entries).
+   */
+  stopTrackingSyncState(id: RawCoID): void;
+
+  /**
+   * Load only the knownState (header presence + session counters) for a CoValue.
+   * This is more efficient than load() when we only need to check if a peer needs new content.
+   *
+   * @param id - The CoValue ID
+   * @param callback - Called with the knownState, or undefined if CoValue not found
+   */
+  loadKnownState(
+    id: string,
+    callback: (knownState: CoValueKnownState | undefined) => void,
+  ): void;
+
+  /**
+   * Called when a CoValue is unmounted from memory.
+   * Used to clean up the metadata associated with that CoValue.
+   */
+  onCoValueUnmounted(id: RawCoID): void;
 
   close(): Promise<unknown> | undefined;
 }
@@ -118,6 +162,22 @@ export interface DBClientInterfaceAsync {
   transaction(
     callback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
   ): Promise<unknown>;
+
+  trackCoValuesSyncState(
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+  ): Promise<void>;
+
+  getUnsyncedCoValueIDs(): Promise<RawCoID[]>;
+
+  stopTrackingSyncState(id: RawCoID): Promise<void>;
+
+  /**
+   * Get the knownState for a CoValue without loading transactions.
+   * Returns undefined if the CoValue doesn't exist.
+   */
+  getCoValueKnownState(
+    coValueId: string,
+  ): Promise<CoValueKnownState | undefined>;
 }
 
 export interface DBTransactionInterfaceSync {
@@ -170,4 +230,18 @@ export interface DBClientInterfaceSync {
   ): Pick<SignatureAfterRow, "idx" | "signature">[];
 
   transaction(callback: (tx: DBTransactionInterfaceSync) => unknown): unknown;
+
+  trackCoValuesSyncState(
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+  ): void;
+
+  getUnsyncedCoValueIDs(): RawCoID[];
+
+  stopTrackingSyncState(id: RawCoID): void;
+
+  /**
+   * Get the knownState for a CoValue without loading transactions.
+   * Returns undefined if the CoValue doesn't exist.
+   */
+  getCoValueKnownState(coValueId: string): CoValueKnownState | undefined;
 }

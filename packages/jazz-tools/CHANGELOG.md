@@ -1,5 +1,105 @@
 # jazz-tools
 
+## 0.19.22
+
+### Patch Changes
+
+- 89d8798: Adds a 512 variant for progressive image loading.
+- 30b5339: Fix an issue when generating image placeholders from clients using Expo Image Manipulator
+- Updated dependencies [3b70482]
+- Updated dependencies [6078ea5]
+  - cojson@0.19.22
+  - cojson-storage-indexeddb@0.19.22
+  - cojson-transport-ws@0.19.22
+
+## 0.19.19
+
+### Patch Changes
+
+- 171e1c6: Add Better Auth provider for Svelte
+- 053a283: Added `getJazzErrorType` helper function to identify the type of Jazz error from an Error object thrown by suspense hooks. This enables error boundaries to display appropriate UI based on whether the error is "unauthorized", "unavailable", or "unknown".
+- 41b2cf4: Context.authenticate now doesn't replace the context if the same AccountID is already logged in
+- 923bc8e: Adds Svelte Better Auth support
+  Upgrades Better Auth compatibility to version 1.4.7
+- 83f84ca: Resume interrupted CoValue sync on app restart (without requiring CoValues to be manually reloaded)
+- Updated dependencies [83f84ca]
+  - cojson@0.19.19
+  - cojson-storage-indexeddb@0.19.19
+  - cojson-transport-ws@0.19.19
+
+## 0.19.18
+
+### Patch Changes
+
+- 729d46c: Fixed Clerk types schema to use `.or()` method consistently for union types
+  - cojson@0.19.18
+  - cojson-storage-indexeddb@0.19.18
+  - cojson-transport-ws@0.19.18
+
+## 0.19.17
+
+### Patch Changes
+
+- d46cffd: Bugfix: fixed an issue where calling logOut multiple times concurrently could trigger duplicate logout operations
+  - cojson@0.19.17
+  - cojson-storage-indexeddb@0.19.17
+  - cojson-transport-ws@0.19.17
+
+## 0.19.16
+
+### Patch Changes
+
+- 25268bf: Bugfix: fixed a race condition in Clerk auth where the signup flow could trigger a duplicate login attempt
+- Updated dependencies [265d0e9]
+  - cojson@0.19.16
+  - cojson-storage-indexeddb@0.19.16
+  - cojson-transport-ws@0.19.16
+
+## 0.19.15
+
+### Patch Changes
+
+- 94012a1: Added a locking system for session IDs in React Native
+
+  Now it should be safer to mount multiple JazzProviders, but still not advised as it is really expensive
+
+- 86f9676: Adds a createdBy getter
+- b27dbc2: Fix Object.keys(coMap.getEdits()) to return also deleted keys
+- Updated dependencies [71ed9d6]
+  - cojson@0.19.15
+  - cojson-storage-indexeddb@0.19.15
+  - cojson-transport-ws@0.19.15
+
+## 0.19.14
+
+### Patch Changes
+
+- cojson@0.19.14
+- cojson-storage-indexeddb@0.19.14
+- cojson-transport-ws@0.19.14
+
+## 0.19.13
+
+### Patch Changes
+
+- bef1cc6: Bugfix: rewrittern the session provider to prevent race conditions and reuse also the new accounts sessions
+- b839147: Add schema-level permissions to centralize permission configuration
+  - cojson@0.19.13
+  - cojson-storage-indexeddb@0.19.13
+  - cojson-transport-ws@0.19.13
+
+## 0.19.12
+
+### Patch Changes
+
+- 9ca9e72: Fix the inspector to guess correctly Group's transactions
+- 5b0bb7d: Bugfix: ensure that the promises used for Suspense is always cached
+- fa0759b: Bugfix: close the server peers before calling the onAnonymousAccountDiscarded hook, to ensure that there won't be conflicting issues with the new context sync
+- a2372db: Bugfix: ensure onAnonymousAccountDiscarded hook is conditionally applied in React providers
+  - cojson@0.19.12
+  - cojson-storage-indexeddb@0.19.12
+  - cojson-transport-ws@0.19.12
+
 ## 0.19.11
 
 ### Patch Changes
@@ -377,6 +477,7 @@
 ### Patch Changes
 
 - f2f478a: Add connection status API for React and Svelte
+
   - **React**: Added `useSyncConnectionStatus()` hook that returns the current connection status to the Jazz sync server
   - **Svelte**: Added `SyncConnectionStatus` class that provides reactive connection status monitoring
 
@@ -412,6 +513,7 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
+
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -795,6 +897,7 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
+
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

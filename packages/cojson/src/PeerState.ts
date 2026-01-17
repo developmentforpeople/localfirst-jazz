@@ -1,5 +1,5 @@
 import { PeerKnownState } from "./coValueCore/PeerKnownState.js";
-import { RawCoID, SessionID } from "./ids.js";
+import { RawCoID } from "./ids.js";
 import { CoValueKnownState } from "./knownState.js";
 import { logger } from "./logger.js";
 import { Peer, SyncMessage } from "./sync.js";
@@ -114,7 +114,7 @@ export class PeerState {
     this.triggerUpdate(id, knownState);
   }
 
-  listeners = new Set<(id: RawCoID, value: PeerKnownState) => void>();
+  private listeners = new Set<(id: RawCoID, value: PeerKnownState) => void>();
 
   private triggerUpdate(id: RawCoID, value: PeerKnownState) {
     for (const listener of this.listeners) {
@@ -181,7 +181,7 @@ export class PeerState {
     this.closeListeners.clear();
   }
 
-  gracefulShutdown() {
+  gracefulShutdown(): void {
     if (this.closed) {
       return;
     }
