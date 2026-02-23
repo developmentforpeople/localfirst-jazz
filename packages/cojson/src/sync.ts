@@ -25,7 +25,8 @@ import { CoValuePriority } from "./priority.js";
 import { IncomingMessagesQueue } from "./queue/IncomingMessagesQueue.js";
 import { LocalTransactionsSyncQueue } from "./queue/LocalTransactionsSyncQueue.js";
 import type { StorageStreamingQueue } from "./queue/StorageStreamingQueue.js";
-import { StorageReconciliationAckTracker } from "./StorageReconciliationAckTracker.js";
+import { OngoingStorageReconciliationTracker } from "./OngoingStorageReconciliationTracker.js";
+import { StorageReconciliationServerAckTracker } from "./StorageReconciliationAckTracker.js";
 import {
   CoValueKnownState,
   knownStateFrom,
@@ -75,15 +76,17 @@ export type DoneMessage = {
   id: RawCoID;
 };
 
+export type ReconcileBatchID = string;
+
 export type ReconcileMessage = {
   action: "reconcile";
-  id: string;
+  id: ReconcileBatchID;
   values: [coValue: RawCoID, sessionsHash: string][];
 };
 
 export type ReconcileAckMessage = {
   action: "reconcile-ack";
-  id: string;
+  id: ReconcileBatchID;
 };
 
 /**
@@ -138,7 +141,16 @@ export type ServerPeerSelector = (
 export class SyncManager {
   peers: { [key: PeerID]: PeerState } = {};
   local: LocalNode;
-  private reconciliationAckTracker = new StorageReconciliationAckTracker();
+  /**
+   * Tracks pending reconcile acks from the server.
+   */
+  private reconciliationAckTracker =
+    new StorageReconciliationServerAckTracker();
+  /**
+   * Tracks ongoing storage reconciliation batches in a server.
+   */
+  private ongoingStorageReconciliationTracker =
+    new OngoingStorageReconciliationTracker();
 
   get pendingReconciliationAck(): Map<string, number> {
     return this.reconciliationAckTracker.pendingReconciliationAck;
@@ -766,6 +778,7 @@ export class SyncManager {
 
     peerState.addCloseListener(() => {
       unsubscribeFromKnownStatesUpdates();
+      this.ongoingStorageReconciliationTracker.clearPeer(peer.id);
       this.peersCounter.add(-1, { role: peer.role });
 
       if (!peer.persistent && this.peers[peer.id] === peerState) {
@@ -961,14 +974,34 @@ export class SyncManager {
     }
 
     peer.trackLoadRequestComplete(coValue, "known");
+    this.maybeMarkCoValueAsReconciled(peer, msg.id);
   }
 
   handleReconcile(msg: ReconcileMessage, peer: PeerState): void {
-    let pending = msg.values.length;
-    const sendAckWhenDone = () => {
-      if (--pending === 0) {
-        this.trySendToPeer(peer, { action: "reconcile-ack", id: msg.id });
+    let remaining = msg.values.length;
+    if (remaining === 0) {
+      this.trySendToPeer(peer, { action: "reconcile-ack", id: msg.id });
+      return;
+    }
+
+    const pending = new Set<RawCoID>();
+    const processEntryDone = () => {
+      remaining -= 1;
+
+      if (remaining !== 0) {
+        return;
       }
+
+      if (pending.size === 0) {
+        this.trySendToPeer(peer, { action: "reconcile-ack", id: msg.id });
+        return;
+      }
+
+      this.ongoingStorageReconciliationTracker.trackBatch(
+        peer.id,
+        msg.id,
+        pending,
+      );
     };
 
     for (const [coValueId, clientSessionsHash] of msg.values) {
@@ -977,7 +1010,7 @@ export class SyncManager {
         ? this.local.getCoValue(coValueId)
         : undefined;
       if (inMemoryCoValue?.isErroredInPeer(peer.id)) {
-        sendAckWhenDone();
+        processEntryDone();
         continue;
       }
 
@@ -985,6 +1018,7 @@ export class SyncManager {
         knownState: CoValueKnownState | undefined,
       ) => {
         if (!knownState) {
+          pending.add(coValueId);
           peer.trackToldKnownState(coValueId);
           this.trySendToPeer(peer, {
             action: "load",
@@ -997,11 +1031,12 @@ export class SyncManager {
             knownState.sessions,
           );
           if (serverSessionsHash !== clientSessionsHash) {
+            pending.add(coValueId);
             peer.trackToldKnownState(coValueId);
             this.trySendToPeer(peer, { action: "load", ...knownState });
           }
         }
-        sendAckWhenDone();
+        processEntryDone();
       };
 
       if (
@@ -1014,10 +1049,6 @@ export class SyncManager {
           ? this.local.storage.loadKnownState(coValueId, maybeSendLoadRequest)
           : maybeSendLoadRequest(undefined);
       }
-    }
-
-    if (msg.values.length === 0) {
-      this.trySendToPeer(peer, { action: "reconcile-ack", id: msg.id });
     }
   }
 
@@ -1338,6 +1369,9 @@ export class SyncManager {
     }
 
     peer?.trackLoadRequestComplete(coValue, "content");
+    if (peer && !coValue.isStreaming()) {
+      this.maybeMarkCoValueAsReconciled(peer, msg.id);
+    }
 
     for (const peer of this.getPeers(coValue.id)) {
       /**
@@ -1362,6 +1396,20 @@ export class SyncManager {
     peer.setKnownState(msg.id, knownStateFrom(msg));
 
     return this.sendNewContent(msg.id, peer);
+  }
+
+  private maybeMarkCoValueAsReconciled(peer: PeerState, coValueId: RawCoID) {
+    const completedBatchIds =
+      this.ongoingStorageReconciliationTracker.markItemComplete(
+        peer.id,
+        coValueId,
+      );
+    for (const batchId of completedBatchIds) {
+      this.trySendToPeer(peer, {
+        action: "reconcile-ack",
+        id: batchId,
+      });
+    }
   }
 
   private syncQueue = new LocalTransactionsSyncQueue((content) =>
