@@ -56,6 +56,9 @@ export class OngoingStorageReconciliationTracker {
     }
   }
 
+  /**
+   * Marks a coValue as reconciled and returns the batch IDs that completed syncing.
+   */
   markItemComplete(peerId: PeerID, coValueId: RawCoID): ReconcileBatchID[] {
     const coValuesToBatches = this.reconcileBatchesByCoValue.get(peerId);
     const batchesForPeer = this.reconcileBatches.get(peerId);
