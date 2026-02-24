@@ -1,19 +1,12 @@
 import { RawCoID } from "./ids.js";
 import { PeerID, ReconcileBatchID } from "./sync.js";
 
-type ReconcileBatchTracker = {
-  coValues: Set<RawCoID>;
-  pending: Set<RawCoID>;
-};
-
 /**
  * Tracks ongoing storage reconciliation batches in a server.
  */
 export class OngoingStorageReconciliationTracker {
-  private reconcileBatches: Map<
-    PeerID,
-    Map<ReconcileBatchID, ReconcileBatchTracker>
-  > = new Map();
+  private reconcileBatches: Map<PeerID, Map<ReconcileBatchID, Set<RawCoID>>> =
+    new Map();
   private reconcileBatchesByCoValue: Map<
     PeerID,
     Map<RawCoID, Set<ReconcileBatchID>>
@@ -22,7 +15,7 @@ export class OngoingStorageReconciliationTracker {
   trackBatch(
     peerId: PeerID,
     batchId: ReconcileBatchID,
-    pendingCoValues: ReadonlySet<RawCoID>,
+    pendingCoValues: Set<RawCoID>,
   ): void {
     if (pendingCoValues.size === 0) {
       return;
@@ -34,11 +27,7 @@ export class OngoingStorageReconciliationTracker {
       this.reconcileBatches.set(peerId, batchesForPeer);
     }
 
-    const trackedBatch: ReconcileBatchTracker = {
-      pending: new Set(pendingCoValues),
-      coValues: new Set(pendingCoValues),
-    };
-    batchesForPeer.set(batchId, trackedBatch);
+    batchesForPeer.set(batchId, pendingCoValues);
 
     let coValuesToBatches = this.reconcileBatchesByCoValue.get(peerId);
     if (!coValuesToBatches) {
@@ -79,18 +68,23 @@ export class OngoingStorageReconciliationTracker {
       if (!batch) {
         continue;
       }
-
-      batch.pending.delete(coValueId);
-
-      if (batch.pending.size === 0) {
+      batch.delete(coValueId);
+      if (batch.size === 0) {
         completedBatchIds.push(batchId);
       }
     }
 
+    // This coValue was just completed, so it is no longer pending in any batch.
     coValuesToBatches.delete(coValueId);
-
     for (const batchId of completedBatchIds) {
-      this.clearBatch(peerId, batchId);
+      batchesForPeer.delete(batchId);
+    }
+
+    if (coValuesToBatches.size === 0) {
+      this.reconcileBatchesByCoValue.delete(peerId);
+    }
+    if (batchesForPeer.size === 0) {
+      this.reconcileBatches.delete(peerId);
     }
 
     return completedBatchIds;
@@ -99,40 +93,5 @@ export class OngoingStorageReconciliationTracker {
   clearPeer(peerId: PeerID): void {
     this.reconcileBatches.delete(peerId);
     this.reconcileBatchesByCoValue.delete(peerId);
-  }
-
-  private clearBatch(peerId: PeerID, batchId: ReconcileBatchID): void {
-    const batchesForPeer = this.reconcileBatches.get(peerId);
-    if (!batchesForPeer) {
-      return;
-    }
-
-    const batch = batchesForPeer.get(batchId);
-    if (!batch) {
-      return;
-    }
-
-    const coValuesToBatches = this.reconcileBatchesByCoValue.get(peerId);
-    if (coValuesToBatches) {
-      for (const coValueId of batch.coValues) {
-        const batchIds = coValuesToBatches.get(coValueId);
-        if (!batchIds) {
-          continue;
-        }
-        batchIds.delete(batchId);
-        if (batchIds.size === 0) {
-          coValuesToBatches.delete(coValueId);
-        }
-      }
-
-      if (coValuesToBatches.size === 0) {
-        this.reconcileBatchesByCoValue.delete(peerId);
-      }
-    }
-
-    batchesForPeer.delete(batchId);
-    if (batchesForPeer.size === 0) {
-      this.reconcileBatches.delete(peerId);
-    }
   }
 }
