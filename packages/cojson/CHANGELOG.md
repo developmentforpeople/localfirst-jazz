@@ -1,5 +1,14 @@
 # cojson
 
+## 0.20.11
+
+### Patch Changes
+
+- d91408c: Wait for coValue sync before acknowledging a storage reconciliation batch
+  - cojson-core-wasm@0.20.11
+  - cojson-core-rn@0.20.11
+  - cojson-core-napi@0.20.11
+
 ## 0.20.10
 
 ### Patch Changes
