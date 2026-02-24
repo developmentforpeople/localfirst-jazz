@@ -1,8 +1,8 @@
 import { PeerState } from "./PeerState.js";
 
-export class StorageReconciliationAckTracker {
+export class StorageReconciliationServerAckTracker {
   /**
-   * Tracks pending reconcile acks: "batchId#peerId->offset".
+   * Tracks pending reconcile acks from the server: "batchId#peerId->offset".
    * Cleared in handleAck.
    */
   pendingReconciliationAck: Map<string, number> = new Map();

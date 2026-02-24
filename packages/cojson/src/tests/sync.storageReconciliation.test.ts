@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import {
   cojsonInternals,
   LocalNode,
@@ -13,8 +13,6 @@ import {
   waitFor,
 } from "./testUtils";
 import {
-  GARBAGE_COLLECTOR_CONFIG,
-  setGarbageCollectorMaxAge,
   setStorageReconciliationBatchSize,
   setStorageReconciliationInterval,
   setStorageReconciliationLockTTL,
@@ -39,7 +37,7 @@ beforeEach(async () => {
 });
 
 describe("full storage reconciliation", () => {
-  test("startStorageReconciliation sends 'reconcile' message, server responds with 'known' messages for missing CoValues", async () => {
+  test("startStorageReconciliation sends 'reconcile' message, server responds with 'load' messages for missing CoValues", async () => {
     const client = setupTestNode();
     const { storage } = client.addStorage();
 
@@ -78,7 +76,6 @@ describe("full storage reconciliation", () => {
         "client -> server | RECONCILE",
         "server -> client | LOAD Group sessions: empty",
         "server -> client | LOAD Map sessions: empty",
-        "server -> client | RECONCILE_ACK",
         "client -> storage | LOAD Group sessions: empty",
         "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
         "client -> server | CONTENT Group header: true new: After: 0 New: 4",
@@ -89,11 +86,12 @@ describe("full storage reconciliation", () => {
         "client -> server | KNOWN Map sessions: header/1",
         "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
+        "server -> client | RECONCILE_ACK",
       ]
     `);
   });
 
-  test("startStorageReconciliation sends 'reconcile' message, server responds with 'known' messages for outdated CoValues", async () => {
+  test("startStorageReconciliation sends 'reconcile' message, server responds with 'load' messages for outdated CoValues", async () => {
     const client = setupTestNode();
     const { storage } = client.addStorage();
     client.connectToSyncServer({ persistent: true });
@@ -124,6 +122,7 @@ describe("full storage reconciliation", () => {
       Group: group.core,
       Map: map.core,
     });
+    // Note: reconcile-ack is sent after all the unsynced coValues in the batch are synced
     expect(messages).toMatchInlineSnapshot(`
       [
         "client -> storage | GET_KNOWN_STATE Group",
@@ -132,7 +131,6 @@ describe("full storage reconciliation", () => {
         "storage -> client | GET_KNOWN_STATE_RESULT Map sessions: header/2",
         "client -> server | RECONCILE",
         "server -> client | LOAD Map sessions: header/1",
-        "server -> client | RECONCILE_ACK",
         "client -> storage | GET_KNOWN_STATE Map",
         "storage -> client | GET_KNOWN_STATE_RESULT Map sessions: header/2",
         "client -> storage | LOAD Map sessions: empty",
@@ -143,6 +141,7 @@ describe("full storage reconciliation", () => {
         "client -> server | KNOWN Map sessions: header/2",
         "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/2",
+        "server -> client | RECONCILE_ACK",
       ]
     `);
   });
@@ -224,7 +223,6 @@ describe("full storage reconciliation", () => {
         "client -> server | RECONCILE",
         "server -> client | LOAD Group sessions: empty",
         "server -> client | LOAD Map sessions: empty",
-        "server -> client | RECONCILE_ACK",
         "client -> storage | LOAD Group sessions: empty",
         "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
         "client -> server | CONTENT Group header: true new: After: 0 New: 4",
@@ -235,6 +233,7 @@ describe("full storage reconciliation", () => {
         "client -> server | KNOWN Map sessions: header/1",
         "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
+        "server -> client | RECONCILE_ACK",
       ]
     `);
   });
@@ -441,7 +440,6 @@ describe("full storage reconciliation", () => {
           "client -> server | RECONCILE",
           "server -> client | LOAD Group sessions: empty",
           "server -> client | LOAD Map sessions: empty",
-          "server -> client | RECONCILE_ACK",
           "client -> storage | LOAD Group sessions: empty",
           "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
           "client -> server | CONTENT Group header: true new: After: 0 New: 4",
@@ -452,6 +450,7 @@ describe("full storage reconciliation", () => {
           "client -> server | KNOWN Map sessions: header/1",
           "server -> client | KNOWN Group sessions: header/4",
           "server -> client | KNOWN Map sessions: header/1",
+          "server -> client | RECONCILE_ACK",
         ]
       `);
     });

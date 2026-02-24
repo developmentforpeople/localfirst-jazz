@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { PeerState } from "../PeerState.js";
-import { StorageReconciliationAckTracker } from "../StorageReconciliationAckTracker.js";
+import { StorageReconciliationServerAckTracker } from "../StorageReconciliationAckTracker.js";
 import { ConnectedPeerChannel } from "../streamUtils.js";
 import { Peer } from "../sync.js";
 
@@ -18,7 +18,7 @@ function createPeerState(id = "peer-1"): PeerState {
 
 describe("StorageReconciliationAckTracker", () => {
   test("tracks pending acks and returns next offset on ack", () => {
-    const tracker = new StorageReconciliationAckTracker();
+    const tracker = new StorageReconciliationServerAckTracker();
 
     tracker.trackBatch("batch-1", "peer-1", 100);
 
@@ -31,7 +31,7 @@ describe("StorageReconciliationAckTracker", () => {
   });
 
   test("invokes registered callback when ack is received", () => {
-    const tracker = new StorageReconciliationAckTracker();
+    const tracker = new StorageReconciliationServerAckTracker();
     const peer = createPeerState("peer-1");
     const onAck = vi.fn();
 
@@ -46,7 +46,7 @@ describe("StorageReconciliationAckTracker", () => {
   });
 
   test("invokes callback only once even if peer closes after ack", () => {
-    const tracker = new StorageReconciliationAckTracker();
+    const tracker = new StorageReconciliationServerAckTracker();
     const peer = createPeerState("peer-1");
     const onAck = vi.fn();
 
@@ -59,7 +59,7 @@ describe("StorageReconciliationAckTracker", () => {
   });
 
   test("invokes all listeners registered for a batch", () => {
-    const tracker = new StorageReconciliationAckTracker();
+    const tracker = new StorageReconciliationServerAckTracker();
     const peer = createPeerState("peer-1");
     const first = vi.fn();
     const second = vi.fn();
@@ -74,7 +74,7 @@ describe("StorageReconciliationAckTracker", () => {
   });
 
   test("calls callback immediately when batch is not pending", () => {
-    const tracker = new StorageReconciliationAckTracker();
+    const tracker = new StorageReconciliationServerAckTracker();
     const peer = createPeerState("peer-1");
     const onAck = vi.fn();
 
@@ -84,7 +84,7 @@ describe("StorageReconciliationAckTracker", () => {
   });
 
   test("aborts wait on peer close and clears pending ack", () => {
-    const tracker = new StorageReconciliationAckTracker();
+    const tracker = new StorageReconciliationServerAckTracker();
     const peer = createPeerState("peer-1");
     const onAck = vi.fn();
 
