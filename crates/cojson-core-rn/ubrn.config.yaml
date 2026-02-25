@@ -3,6 +3,13 @@ rust:
   directory: .
   manifestPath: rust/Cargo.toml
 
+
+ios:
+  targets:
+    - aarch64-apple-ios
+    - aarch64-apple-ios-sim
+    - x86_64-apple-ios
+
 # This has been made to allow compilation with -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON
 # Once the new Uniffi version 0.30.0, which supports this flag, is released, we will be able to remove it.
 noOverwrite:
