@@ -24,9 +24,6 @@ import { createJazzContext } from "jazz-tools";
 import { setupInspector } from "./utils/export-account-inspector.js";
 import { getBrowserLockSessionProvider } from "./provideBrowserLockSession/index.js";
 
-// DFP added export
-export { getStorageOptions };
-
 setupInspector();
 
 export type BaseBrowserContextOptions = {
