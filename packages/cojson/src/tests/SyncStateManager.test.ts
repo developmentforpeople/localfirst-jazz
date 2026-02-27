@@ -128,6 +128,31 @@ describe("SyncStateManager", () => {
     expect(subscriptionManager.isSynced(peerState, map.core.id)).toBe(true);
   });
 
+  test("isSynced should stay true for garbageCollected CoValues with matching knownState", async () => {
+    const client = setupTestNode({ connected: false });
+    client.addStorage({ ourName: "client" });
+    const { peerState } = client.connectToSyncServer();
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key1", "value1", "trusting");
+
+    const syncState = client.node.syncManager.syncState;
+
+    await waitFor(() => syncState.isSynced(peerState, map.core.id));
+    expect(syncState.isSynced(peerState, map.core.id)).toBe(true);
+
+    const mapCore = client.node.getCoValue(map.id);
+    const mapKnownState = mapCore.knownState();
+    client.node.internalDeleteCoValue(map.id);
+
+    const garbageCollectedMap = client.node.getCoValue(map.id);
+    garbageCollectedMap.setGarbageCollectedState(mapKnownState);
+    expect(garbageCollectedMap.loadingState).toBe("garbageCollected");
+
+    expect(syncState.isSynced(peerState, map.core.id)).toBe(true);
+  });
+
   test("unsubscribe stops receiving updates", async () => {
     // Setup nodes
     const client = setupTestNode({ connected: true });
@@ -307,8 +332,8 @@ describe("SyncStateManager", () => {
       [
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | LOAD Group sessions: empty",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | KNOWN Group sessions: header/3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map sessions: header/1",
       ]
     `);

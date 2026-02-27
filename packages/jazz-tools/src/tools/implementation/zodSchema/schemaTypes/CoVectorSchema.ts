@@ -14,6 +14,8 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
+import { coValueValidationSchema } from "./schemaValidators.js";
 
 export interface CoreCoVectorSchema extends CoreCoValueSchema {
   builtin: "CoVector";
@@ -28,6 +30,7 @@ export function createCoreCoVectorSchema(
     builtin: "CoVector" as const,
     dimensions,
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -36,10 +39,30 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   readonly builtin = "CoVector" as const;
   readonly resolveQuery = true as const;
 
+  #validationSchema: z.ZodType | undefined = undefined;
+  #permissions: SchemaPermissions | null = null;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const validationSchema = z.instanceof(Float32Array).or(z.array(z.number()));
+
+    this.#validationSchema = coValueValidationSchema(
+      validationSchema,
+      CoVector,
+    );
+
+    return this.#validationSchema;
+  };
+
   /**
    * Permissions to be used when creating or composing CoValues
+   * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(
     public dimensions: number,
@@ -117,9 +140,11 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   /**
    * Configure permissions to be used when creating or composing CoValues
    */
-  withPermissions(permissions: SchemaPermissions): CoVectorSchema {
+  withPermissions(
+    permissions: Omit<SchemaPermissions, "writer">,
+  ): CoVectorSchema {
     const copy = new CoVectorSchema(this.dimensions, this.coValueClass);
-    copy.permissions = permissions;
+    copy.#permissions = permissions;
     return copy;
   }
 }

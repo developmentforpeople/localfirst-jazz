@@ -14,6 +14,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
 
 export interface CoreFileStreamSchema extends CoreCoValueSchema {
   builtin: "FileStream";
@@ -24,6 +25,7 @@ export function createCoreFileStreamSchema(): CoreFileStreamSchema {
     collaborative: true as const,
     builtin: "FileStream" as const,
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -32,10 +34,24 @@ export class FileStreamSchema implements CoreFileStreamSchema {
   readonly builtin = "FileStream" as const;
   readonly resolveQuery = true as const;
 
+  #validationSchema: z.ZodType | undefined = undefined;
+  #permissions: SchemaPermissions | null = null;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z.instanceof(FileStream);
+    return this.#validationSchema;
+  };
+
   /**
    * Permissions to be used when creating or composing CoValues
+   * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(private coValueClass: typeof FileStream) {}
 
@@ -156,10 +172,10 @@ export class FileStreamSchema implements CoreFileStreamSchema {
    * Configure permissions to be used when creating or composing CoValues
    */
   withPermissions(
-    permissions: Omit<SchemaPermissions, "onInlineCreate">,
+    permissions: Omit<SchemaPermissions, "onInlineCreate" | "writer">,
   ): FileStreamSchema {
     const copy = new FileStreamSchema(this.coValueClass);
-    copy.permissions = permissions;
+    copy.#permissions = permissions;
     return copy;
   }
 }

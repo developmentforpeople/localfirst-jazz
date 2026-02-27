@@ -1,7 +1,13 @@
 import { PeerKnownState } from "./coValueCore/PeerKnownState.js";
+import { CoValueCore } from "./exports.js";
 import { RawCoID } from "./ids.js";
 import { CoValueKnownState } from "./knownState.js";
 import { logger } from "./logger.js";
+import {
+  type LoadCompletionSource,
+  type LoadMode,
+  OutgoingLoadQueue,
+} from "./queue/OutgoingLoadQueue.js";
 import { Peer, SyncMessage } from "./sync.js";
 
 export class PeerState {
@@ -17,6 +23,7 @@ export class PeerState {
     knownStates: Map<RawCoID, PeerKnownState> | undefined,
   ) {
     this._knownStates = knownStates ?? new Map();
+    this.loadQueue = new OutgoingLoadQueue(peer.id);
   }
 
   getKnownState(id: RawCoID) {
@@ -54,10 +61,32 @@ export class PeerState {
 
   readonly toldKnownState: Set<RawCoID> = new Set();
   readonly loadRequestSent: Set<RawCoID> = new Set();
+  private loadQueue: OutgoingLoadQueue;
 
-  trackLoadRequestSent(id: RawCoID) {
-    this.toldKnownState.add(id);
-    this.loadRequestSent.add(id);
+  sendLoadRequest(coValue: CoValueCore, mode?: LoadMode): void {
+    this.toldKnownState.add(coValue.id);
+    this.loadRequestSent.add(coValue.id);
+    this.loadQueue.enqueue(
+      coValue,
+      () => {
+        this.pushOutgoingMessage({
+          action: "load",
+          ...coValue.knownStateWithStreaming(),
+        });
+      },
+      mode,
+    );
+  }
+
+  trackLoadRequestUpdate(coValue: CoValueCore) {
+    this.loadQueue.trackUpdate(coValue);
+  }
+
+  trackLoadRequestComplete(
+    coValue: CoValueCore,
+    source: LoadCompletionSource = "content",
+  ) {
+    this.loadQueue.trackComplete(coValue, source);
   }
 
   trackToldKnownState(id: RawCoID) {
@@ -192,6 +221,7 @@ export class PeerState {
     });
 
     this.closed = true;
+    this.loadQueue.clear();
     this.peer.outgoing.push("Disconnected");
     this.peer.outgoing.close();
     this.peer.incoming.close();

@@ -1,3 +1,89 @@
+Released Jazz 0.20.10:
+- Added optional restricted deletion mode for CoLists via schema permissions (`co.list().withPermission({ writer: "appendOnly" })`), so only manager/admin roles can delete when append-only mode is enabled.
+- Added periodic full storage reconciliation to keep locally stored CoValues in sync with the server, with interruption handling and resume support.
+- Improved sync load handling by prioritizing pending loads, fixing in-flight load tracking, and ensuring peers always reply to load requests even when there is no content delta.
+- Added richer observability for sync and transport internals, including queue/load metrics and WebSocket ping-delay metadata/logging.
+- Improved reconciliation and sync performance across storage adapters by reducing unnecessary content loading, optimizing SQLite reconciliation queries, and refining batch/ack flow behavior.
+- Introduced runtime validation modes for write operations  (`strict` and `loose`) and app-level defaults via `setDefaultValidationMode()`. The current default remains `loose` (invalid writes still apply but emit a warning), and moving to `strict` is encouraged ahead of a future default change.
+- Added contextual hints when CoValues fail to load due to sync configuration (`when: "never"` or `when: "signedUp"` restrictions).
+- Added an optional `navigation` prop to `JazzSvelteProvider` to wait for pending CoValue syncs before SvelteKit navigations, reducing stale data on SSR pages.
+- Throw immediately when calling `.create()` in groups where the current user does not have write permissions.
+- Reused Expo and OP-SQLite DB clients across multiple Jazz providers to avoid duplicate clients.
+- Replaced `@manuscripts/prosemirror-recreate-steps` with a local implementation to remove transitive vulnerabilities.
+- **BREAKING:** Removed legacy `coField` and `Encoders` exports and completed migration to runtime schema descriptors. Apps using old schema APIs should migrate to current `co`/Zod-based schemas.
+- **BREAKING:** On CoMap instances, the `in` operator now returns `true` for schema-defined keys even when the value is unset/deleted. Use `coMap.$jazz.has("key")` to check whether a value is actually set. Also fixed Hermes V1 proxy invariant issues by making internal CoValue property definitions configurable.
+- Bugfix: fixed support for React Native 0.84
+- Bugfix: fixed CoValues getting stuck in loading state with persistent peers by marking closed peers unavailable after a grace timeout and not treating `KNOWN`+`header: true` as completion without content.
+
+Released Jazz 0.20.9:
+- Bugfix: revert the Expo db adapter to use withTransactionAsync instead of withExclusiveTransactionAsync
+
+Released Jazz 0.20.8:
+- Improved FileStream base64 encoding performance. Up to **20x faster** in `asBase64` conversion on React Native and around **5x faster** blob conversions on all the platforms.
+- Delayed CoValue content parsing in subscriptions until the value is fully downloaded, avoiding unnecessary intermediate parsing for streaming values
+- Added `getOrCreateUnique` method to CoMap, CoList, and CoFeed. This provides a "get or create only" semantic — it returns an existing value as-is, and only uses the provided value when creating a new CoValue. Unlike `upsertUnique`, it does NOT update existing values. Also deprecates `loadUnique` and `upsertUnique` in favor of `getOrCreateUnique`.
+- Introduced key revelations based on a group owned asymmetric key. This makes extending groups without having access to the encryption key zero-cost for the parent group.
+- Added optional `name` metadata to Groups. Groups can now be created with a display name (e.g. `Group.create({ owner: account, name: "Billing" })`)
+- Improved performance of writeKey revelations permission checks in groups with many writeOnlyKeys
+- Bugfix: fixed `createdAt` getter to use CoValue's header
+- Bugfix: fixed issue with CoRecord serialisation
+- Bugfix: prevent conflicts between concurrent async SQLite transactions
+
+Released Jazz 0.20.7:
+- Bugfix: fixed a memory leak in the WebSocket outgoing queue introduced in 0.20.1 and improved queue close management
+
+Released Jazz 0.20.6:
+- Improved performance of read key lookups in groups by using cached indices instead of iterating through all keys
+
+Released Jazz 0.20.5:
+- Bugfix: fixed "TypeError: crypto.randomUUID is not a function (it is undefined)" on React Native
+- Bugfix: fixed "can't access property useContext, dispatcher is null" error when using the inspector in Svelte
+
+Released Jazz 0.20.4:
+- Bugfix: infinite re-render loop when accessing nested CoValues in React hooks calls with `resolve: {}`
+
+Released Jazz 0.20.3:
+- Added caching for groups when accessing a readKey
+
+Released Jazz 0.20.2:
+- Added a Performance tab in the Jazz tools inspector
+- Optimized peer reconciliation to prevent unnecessary data transfer on reconnect.
+
+Released Jazz 0.20.1:
+- Added client-side load request throttling to improve the loading experience when loading a lot of data concurrently. When a client requests more than 1k CoValues concurrently, load requests are now queued locally and sent as capacity becomes available.
+- Bugfix: `setDefaultSchemaPermissions` now modifies existing CoValue schemas
+- Bugfix: fixed `CoList` to return the correct length when calling `getOwnPropertyDescriptor` with `length`. Previously it was always returning 0.
+
+Released Jazz 0.20.0:
+
+With this release, we introduce a new, simple to use API for [permanently deleting CoValues](https://jazz.tools/docs/react/core-concepts/deleting). 
+
+For auditing and data recovery purposes, we still recommend using soft-deletes wherever possible. However, we appreciate that for various reasons (data privacy, storage space), it may be preferable to delete data permanently. From Jazz 0.20.0 onwards, you'll be able to do this easily, and build experiences where your users can manage their own data.
+
+Additionally, with this release we complete the migration to a pure native Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+
+The JavaScript crypto implementation is much slower than native Rust crypto. Although workarounds like RNQuickCrypto for React Native improved performance, they still only wrapped certain native libraries, rather than running Jazz's full Rust crypto.
+
+With native Rust crypto now running everywhere, Jazz delivers good performance on every platform. This also helps us speed up the migration of Jazz Core to Rust which will improve Jazz overall performance.
+
+Changes:
+- **Removed `PureJSCrypto`** from `cojson` (including the `cojson/crypto/PureJSCrypto` export).
+- **Removed `RNQuickCrypto`** from `jazz-tools`.
+- **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
+- **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
+- Optimized the JS-to-Rust communication by implementing native data type exchange, eliminating serialization overhead.
+- Added permanent [CoValue deletion](https://jazz.tools/docs/react/core-concepts/deleting) with a new `deleted` loading state.
+- Restricted `unique` parameters to strings or string records for deterministic serialization.
+- `removeMember` now throws when the caller is unauthorized.
+- React context changes: `useJazzContextValue` replaces value access, `useJazzContext` returns the manager, and nested `JazzProvider` now throws.
+
+Full migration guide: [here](https://jazz.tools/docs/upgrade/0-20-0)
+
+Released Jazz 0.19.22:
+- Added a 512 variant for progressive image loading
+- Bugfix: fixed an issue when generating image placeholders from clients using Expo Image Manipulator
+- Bugfix: wait for CoValues to be synced before garbage-collecting them
+- Bugfix: wait for CoValues' dependencies to be garbage-collected before collecting them. This makes accounts and groups safe to be collected
 
 Released Jazz 0.19.21:
   - Added `useCoStates` & `useSuspenseCoStates` React hooks to load multiple CoValues at the same time
@@ -107,8 +193,9 @@ Released Jazz 0.19.2:
 Released Jazz 0.19.1:
 - co.discriminatedUnion schemas now support resolve queries! (thanks @gabrola for this amazing contribution :rocket:)
 
-**Jazz 0.19.0 released - Explicit CoValue loading states
-This release introduces explicit loading states when loading CoValues, as well as a new way to define how CoValues are loaded.**
+**Jazz 0.19.0 released - Explicit CoValue loading states**
+
+This release introduces explicit loading states when loading CoValues, as well as a new way to define how CoValues are loaded.
 
 Changes:
 - Added a new  $isLoaded field to discriminate between loaded and unloaded CoValues

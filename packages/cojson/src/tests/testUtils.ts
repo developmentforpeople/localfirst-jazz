@@ -5,7 +5,7 @@ import {
   MeterProvider,
   MetricReader,
 } from "@opentelemetry/sdk-metrics";
-import { expect, onTestFinished, vi } from "vitest";
+import { assert, expect, onTestFinished, vi } from "vitest";
 import { ControlledAccount, ControlledAgent } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import {
@@ -28,15 +28,12 @@ import type { Peer, SyncMessage, SyncWhen } from "../sync.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { createAsyncStorage, createSyncStorage } from "./testStorage.js";
-import { PureJSCrypto } from "../crypto/PureJSCrypto.js";
 import { CoValueHeader } from "../coValueCore/verifiedState.js";
 import { idforHeader } from "../coValueCore/coValueCore.js";
 
 let Crypto = await WasmCrypto.create();
 
-export function setCurrentTestCryptoProvider(
-  crypto: WasmCrypto | PureJSCrypto,
-) {
+export function setCurrentTestCryptoProvider(crypto: WasmCrypto) {
   Crypto = crypto;
 }
 
@@ -271,6 +268,7 @@ export function blockMessageTypeOnOutgoingPeer(
   opts: {
     id?: string;
     once?: boolean;
+    matcher?: (msg: SyncMessage) => boolean;
   },
 ) {
   const push = peer.outgoing.push;
@@ -283,7 +281,8 @@ export function blockMessageTypeOnOutgoingPeer(
       typeof msg === "object" &&
       msg.action === messageType &&
       (!opts.id || msg.id === opts.id) &&
-      (!opts.once || !blockedIds.has(msg.id))
+      (!opts.once || !blockedIds.has(msg.id)) &&
+      (!opts.matcher || opts.matcher(msg))
     ) {
       blockedMessages.push(msg);
       blockedIds.add(msg.id);
@@ -452,13 +451,20 @@ export function setupTestNode(
     connected?: boolean;
     secret?: AgentSecret;
     syncWhen?: SyncWhen;
+    enableFullStorageReconciliation?: boolean;
   } = {},
 ) {
   const [admin, session] = opts.secret
     ? agentAndSessionIDFromSecret(opts.secret)
     : randomAgentAndSessionID();
 
-  let node = new LocalNode(admin.agentSecret, session, Crypto, opts.syncWhen);
+  let node = new LocalNode(
+    admin.agentSecret,
+    session,
+    Crypto,
+    opts.syncWhen,
+    opts.enableFullStorageReconciliation,
+  );
 
   if (opts.isSyncServer) {
     syncServer.current = node;
@@ -503,11 +509,11 @@ export function setupTestNode(
   }
 
   async function addAsyncStorage(
-    opts: { ourName?: string; filename?: string } = {},
+    opts: { ourName?: string; filename?: string; storageName?: string } = {},
   ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
       filename: opts.filename,
     });
     node.setStorage(storage);
@@ -535,6 +541,7 @@ export function setupTestNode(
         session,
         Crypto,
         opts.syncWhen,
+        opts.enableFullStorageReconciliation,
       );
 
       if (opts.isSyncServer) {
@@ -548,6 +555,7 @@ export function setupTestNode(
         secret: node.agentSecret,
         connected: opts.connected,
         isSyncServer: opts.isSyncServer,
+        enableFullStorageReconciliation: opts.enableFullStorageReconciliation,
       });
     },
     disconnect: () => {
@@ -640,10 +648,12 @@ export async function setupTestAccount(
     return { storage };
   }
 
-  async function addAsyncStorage(opts: { ourName?: string } = {}) {
+  async function addAsyncStorage(
+    opts: { ourName?: string; storageName?: string } = {},
+  ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
     });
     ctx.node.setStorage(storage);
 
@@ -658,9 +668,14 @@ export async function setupTestAccount(
     await ctx.node.gracefulShutdown();
   });
 
+  const account = ctx.node
+    .getCoValue(ctx.accountID)
+    .getCurrentContent() as RawAccount;
+
   return {
     node: ctx.node,
     accountID: ctx.accountID,
+    account,
     connectToSyncServer,
     addStorage,
     addAsyncStorage,
@@ -812,6 +827,21 @@ export function fillCoMapWithLargeData(map: RawCoMap) {
   }
 
   return map;
+}
+
+export function importContentIntoNode(
+  coValue: CoValueCore,
+  node: LocalNode,
+  chunks?: number,
+) {
+  const content = coValue.newContentSince(undefined);
+  assert(content);
+  for (const [i, chunk] of content.entries()) {
+    if (chunks && i >= chunks) {
+      break;
+    }
+    node.syncManager.handleNewContent(chunk, "import");
+  }
 }
 
 // ============================================================================

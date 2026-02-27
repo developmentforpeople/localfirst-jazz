@@ -1,12 +1,21 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { RawCoID, SessionID } from "../ids";
 import { PeerID } from "../sync";
-import { StorageAPI } from "../storage/types";
+import type {
+  StorageAPI,
+  StorageReconciliationAcquireResult,
+} from "../storage/types";
 import { CoValueKnownState, peerHasAllContent } from "../knownState";
 import { createTestNode, createUnloadedCoValue } from "./testUtils";
 
 function createMockStorage(
   opts: {
+    getCoValueIDs?: (
+      limit: number,
+      offset: number,
+      callback: (batch: { id: RawCoID }[]) => void,
+    ) => void;
+    getCoValueCount?: (callback: (count: number) => void) => void;
     load?: (
       id: RawCoID,
       callback: (data: any) => void,
@@ -25,9 +34,32 @@ function createMockStorage(
     stopTrackingSyncState?: (id: RawCoID) => void;
     onCoValueUnmounted?: (id: RawCoID) => void;
     close?: () => Promise<unknown> | undefined;
+    markDeleteAsValid?: (id: RawCoID) => void;
+    enableDeletedCoValuesErasure?: () => void;
+    eraseAllDeletedCoValues?: () => Promise<void>;
+    tryAcquireStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      callback: (result: StorageReconciliationAcquireResult) => void,
+    ) => void;
+    renewStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      offset: number,
+    ) => void;
+    releaseStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      callback?: () => void,
+    ) => void;
   } = {},
 ): StorageAPI {
   return {
+    getCoValueIDs: opts.getCoValueIDs || vi.fn(),
+    getCoValueCount: opts.getCoValueCount || vi.fn(),
+    markDeleteAsValid: opts.markDeleteAsValid || vi.fn(),
+    enableDeletedCoValuesErasure: opts.enableDeletedCoValuesErasure || vi.fn(),
+    eraseAllDeletedCoValues: opts.eraseAllDeletedCoValues || vi.fn(),
     load: opts.load || vi.fn(),
     store: opts.store || vi.fn(),
     getKnownState: opts.getKnownState || vi.fn(),
@@ -39,6 +71,15 @@ function createMockStorage(
     stopTrackingSyncState: opts.stopTrackingSyncState || vi.fn(),
     onCoValueUnmounted: opts.onCoValueUnmounted || vi.fn(),
     close: opts.close || vi.fn().mockResolvedValue(undefined),
+    tryAcquireStorageReconciliationLock:
+      opts.tryAcquireStorageReconciliationLock ||
+      vi.fn((_sessionId, _peerId, callback) =>
+        callback({ acquired: false as const, reason: "not_due" as const }),
+      ),
+    renewStorageReconciliationLock:
+      opts.renewStorageReconciliationLock || vi.fn(),
+    releaseStorageReconciliationLock:
+      opts.releaseStorageReconciliationLock || vi.fn(),
   };
 }
 
@@ -215,5 +256,57 @@ describe("CoValueCore.getKnownStateFromStorage", () => {
     coValue.getKnownStateFromStorage(doneSpy);
 
     expect(doneSpy).toHaveBeenCalledWith(undefined);
+  });
+
+  test("sets onlyKnownState and caches lastKnownState when storage returns data", () => {
+    const { node, coValue, id } = setup();
+    const storageKnownState = {
+      id,
+      header: true,
+      sessions: { session1: 5 },
+    };
+    const loadKnownStateSpy = vi.fn((id, callback) => {
+      callback(storageKnownState);
+    });
+    const storage = createMockStorage({ loadKnownState: loadKnownStateSpy });
+    node.setStorage(storage);
+
+    // Initially unknown
+    expect(coValue.loadingState).toBe("unknown");
+
+    const doneSpy = vi.fn();
+    coValue.getKnownStateFromStorage(doneSpy);
+
+    // After storage returns data, should be onlyKnownState
+    expect(coValue.loadingState).toBe("onlyKnownState");
+
+    // knownState() should return the cached lastKnownState
+    expect(coValue.knownState()).toEqual(storageKnownState);
+  });
+
+  test("returns cached lastKnownState on subsequent calls without hitting storage", () => {
+    const { node, coValue, id } = setup();
+    const storageKnownState = {
+      id,
+      header: true,
+      sessions: { session1: 5 },
+    };
+    const loadKnownStateSpy = vi.fn((id, callback) => {
+      callback(storageKnownState);
+    });
+    const storage = createMockStorage({ loadKnownState: loadKnownStateSpy });
+    node.setStorage(storage);
+
+    // First call - hits storage
+    const doneSpy1 = vi.fn();
+    coValue.getKnownStateFromStorage(doneSpy1);
+    expect(loadKnownStateSpy).toHaveBeenCalledTimes(1);
+    expect(doneSpy1).toHaveBeenCalledWith(storageKnownState);
+
+    // Second call - should use cached lastKnownState, not hit storage
+    const doneSpy2 = vi.fn();
+    coValue.getKnownStateFromStorage(doneSpy2);
+    expect(loadKnownStateSpy).toHaveBeenCalledTimes(1); // Still 1, not 2
+    expect(doneSpy2).toHaveBeenCalledWith(storageKnownState);
   });
 });

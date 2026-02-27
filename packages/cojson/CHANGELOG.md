@@ -1,5 +1,177 @@
 # cojson
 
+## 0.20.11
+
+### Patch Changes
+
+- d91408c: Wait for coValue sync before acknowledging a storage reconciliation batch
+  - cojson-core-wasm@0.20.11
+  - cojson-core-rn@0.20.11
+  - cojson-core-napi@0.20.11
+
+## 0.20.10
+
+### Patch Changes
+
+- 706ab57: Added optional restricted deletion mode for CoList values, allowing only manager/admin roles to perform deletions when enabled via schema permissions: `co.list().withPermission({writer: "appendOnly"})`
+- 3f50adb: Throw immediately when calling `.create()` on a group where the current user does not have write permissions, instead of silently producing empty data.
+- 283ff4f: Fixed an issue where CoValues could remain stuck in a loading state when using persistent server peers.
+
+  Closed persistent peers are now marked unavailable after a grace timeout, and load requests are no longer considered complete when a peer replies with `KNOWN` and `header: true` but never sends content.
+
+- 93c220c: Improved sync load handling and queue behavior by prioritizing pending loads and ensuring peers always respond to load requests, including cases with no new content.
+
+  Added queue and in-flight load metrics, plus richer WebSocket peer metadata and ping-delay logging to improve observability during sync operations.
+
+- 41d8587: Run a full storage reconciliation process periodically to ensure all CoValues in storage are synced with the server.
+- Updated dependencies [706ab57]
+  - cojson-core-wasm@0.20.10
+  - cojson-core-rn@0.20.10
+  - cojson-core-napi@0.20.10
+
+## 0.20.9
+
+### Patch Changes
+
+- cojson-core-wasm@0.20.9
+- cojson-core-rn@0.20.9
+- cojson-core-napi@0.20.9
+
+## 0.20.8
+
+### Patch Changes
+
+- c7be307: Improved FileStream base64 encoding performance by using `bytesToBase64url` instead of `btoa` with `String.fromCharCode`. Added native `toBase64`/`fromBase64` support in cojson when available.
+
+  **Benchmark results (5MB file):**
+  - `asBase64`: 732.39 op/sec vs 49.78 op/sec (**+1371.36% faster**)
+  - `write`: 12.53 op/sec vs 12.19 op/sec (+2.79%)
+  - `getChunks`: 695.03 op/sec vs 153.89 op/sec (**+351.64% faster**)
+
+- b38a526: fix: prevent conflicts between concurrent async SQLite transactions
+- f701fd7: Added optional `name` metadata to Groups. Groups can now be created with a display name (e.g. `Group.create({ owner: account, name: "Engineering" })`)
+- 99f9d47: Improved performance of writeKey revelations validation in groups with many writeOnlyKeys
+  - cojson-core-wasm@0.20.8
+  - cojson-core-rn@0.20.8
+  - cojson-core-napi@0.20.8
+
+## 0.20.7
+
+### Patch Changes
+
+- 988941c: Fixed a bug in `BatchedOutgoingMessages.push()` where messages sent via the fast path (when WebSocket is ready and not backpressured) were added to the queue but never removed. This caused the `pushed - pulled` metric to grow indefinitely even when the system was idle.
+
+  The fix moves the `queue.push()` call to only happen when taking the slow path (when WebSocket is not ready), since the fast path sends messages directly without using the queue.
+  - cojson-core-wasm@0.20.7
+  - cojson-core-rn@0.20.7
+  - cojson-core-napi@0.20.7
+
+## 0.20.6
+
+### Patch Changes
+
+- cdf8274: Improve performance of read key lookups in groups by using cached indices instead of iterating through all keys
+  - cojson-core-wasm@0.20.6
+  - cojson-core-rn@0.20.6
+  - cojson-core-napi@0.20.6
+
+## 0.20.5
+
+### Patch Changes
+
+- cojson-core-wasm@0.20.5
+- cojson-core-rn@0.20.5
+- cojson-core-napi@0.20.5
+
+## 0.20.4
+
+### Patch Changes
+
+- cojson-core-wasm@0.20.4
+- cojson-core-rn@0.20.4
+- cojson-core-napi@0.20.4
+
+## 0.20.3
+
+### Patch Changes
+
+- eca8b83: Added caching for groups when accessing a readKey.
+  Marked private transactions in groups as invalid.
+  - cojson-core-wasm@0.20.3
+  - cojson-core-rn@0.20.3
+  - cojson-core-napi@0.20.3
+
+## 0.20.2
+
+### Patch Changes
+
+- 251a89e: Optimized peer reconciliation to prevent unnecessary data transfer on reconnect.
+  - cojson-core-wasm@0.20.2
+  - cojson-core-rn@0.20.2
+  - cojson-core-napi@0.20.2
+
+## 0.20.1
+
+### Patch Changes
+
+- 03195eb: Added client-side load request throttling to improve the loading experience when loading a lot of data concurrently.
+
+  When a client requests more than 1k CoValues concurrently, load requests are now queued locally and sent as capacity becomes available.
+  - cojson-core-wasm@0.20.1
+  - cojson-core-rn@0.20.1
+  - cojson-core-napi@0.20.1
+
+## 0.20.0
+
+### Minor Changes
+
+- f562a1f: Restricted the `Uniqueness` type to only accept specific values instead of any `JsonValue`.
+  The allowed types are now: `string`, `number` (as integers), `boolean`, `null`, `undefined`,
+  or an object with string values. Arrays, non-integer numbers, and objects with non-string values are no longer
+  accepted and will throw an error.
+
+  Deprecated `number`, even if it is an integer, as it is not a valid uniqueness type in TS, if you want to continue using numbers,
+  use a string instead or ignore the type check.
+
+- b5ada4d: breaking change: now removeMember throws if unauthorized
+- 8934d8a: ## Full native crypto (0.20.0)
+
+  With this release we complete the migration to a pure Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+
+  ## 💥 Breaking changes
+
+  ### Crypto providers / fallback behavior
+  - **Removed `PureJSCrypto`** from `cojson` (including the `cojson/crypto/PureJSCrypto` export).
+  - **Removed `RNQuickCrypto`** from `jazz-tools`.
+  - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
+  - **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
+
+  Full migration guide: `https://jazz.tools/docs/upgrade/0-20-0`
+
+### Patch Changes
+
+- 6b9368a: Added `deleteCoValues` function to permanently delete CoValues and their nested references.
+  - CoValues are marked with a tombstone, making them inaccessible to all users
+  - Supports deleting nested CoValues via resolve queries
+  - Requires admin permissions on the CoValue's group
+  - Introduces new `deleted` loading state for deleted CoValues
+  - Groups and Accounts are skipped during deletion
+
+  See documentation: https://jazz.tools/docs/react/core-concepts/deleting
+
+- 89332d5: Moved stable JSON serialization from JavaScript to Rust in SessionLog operations
+
+  ### Changes
+  - **`tryAdd`**: Stable serialization now happens in Rust. The Rust layer parses each transaction and re-serializes it to ensure a stable JSON representation for signature verification. JavaScript side now uses `JSON.stringify` instead of `stableStringify`.
+
+  - **`addNewPrivateTransaction`** and **`addNewTrustingTransaction`**: Removed `stableStringify` usage since the data is either encrypted (private) or already in string format (trusting), making stable serialization unnecessary on the JS side.
+
+- Updated dependencies [89332d5]
+- Updated dependencies [8934d8a]
+  - cojson-core-wasm@0.20.0
+  - cojson-core-napi@0.20.0
+  - cojson-core-rn@0.20.0
+
 ## 0.19.22
 
 ### Patch Changes
@@ -365,7 +537,6 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
-
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -386,7 +557,6 @@
 - 2ddf4d9: Introducing version control APIs, unstable_branch and unstable_merge
 
   Flagged as unstable because branch & merge scope & propagation needs to be validated.
-
   - cojson-core-wasm@0.18.13
 
 ## 0.18.12
@@ -602,7 +772,6 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
-
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

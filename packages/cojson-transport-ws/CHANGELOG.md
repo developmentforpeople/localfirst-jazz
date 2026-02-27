@@ -1,5 +1,105 @@
 # cojson-transport-nodejs-ws
 
+## 0.20.11
+
+### Patch Changes
+
+- Updated dependencies [d91408c]
+  - cojson@0.20.11
+
+## 0.20.10
+
+### Patch Changes
+
+- 93c220c: Improved sync load handling and queue behavior by prioritizing pending loads and ensuring peers always respond to load requests, including cases with no new content.
+
+  Added queue and in-flight load metrics, plus richer WebSocket peer metadata and ping-delay logging to improve observability during sync operations.
+
+- Updated dependencies [706ab57]
+- Updated dependencies [3f50adb]
+- Updated dependencies [283ff4f]
+- Updated dependencies [93c220c]
+- Updated dependencies [41d8587]
+  - cojson@0.20.10
+
+## 0.20.9
+
+### Patch Changes
+
+- cojson@0.20.9
+
+## 0.20.8
+
+### Patch Changes
+
+- Updated dependencies [c7be307]
+- Updated dependencies [b38a526]
+- Updated dependencies [f701fd7]
+- Updated dependencies [99f9d47]
+  - cojson@0.20.8
+
+## 0.20.7
+
+### Patch Changes
+
+- 988941c: Fixed a bug in `BatchedOutgoingMessages.push()` where messages sent via the fast path (when WebSocket is ready and not backpressured) were added to the queue but never removed. This caused the `pushed - pulled` metric to grow indefinitely even when the system was idle.
+
+  The fix moves the `queue.push()` call to only happen when taking the slow path (when WebSocket is not ready), since the fast path sends messages directly without using the queue.
+
+- Updated dependencies [988941c]
+  - cojson@0.20.7
+
+## 0.20.6
+
+### Patch Changes
+
+- Updated dependencies [cdf8274]
+  - cojson@0.20.6
+
+## 0.20.5
+
+### Patch Changes
+
+- cojson@0.20.5
+
+## 0.20.4
+
+### Patch Changes
+
+- cojson@0.20.4
+
+## 0.20.3
+
+### Patch Changes
+
+- Updated dependencies [eca8b83]
+  - cojson@0.20.3
+
+## 0.20.2
+
+### Patch Changes
+
+- Updated dependencies [251a89e]
+  - cojson@0.20.2
+
+## 0.20.1
+
+### Patch Changes
+
+- Updated dependencies [03195eb]
+  - cojson@0.20.1
+
+## 0.20.0
+
+### Patch Changes
+
+- Updated dependencies [6b9368a]
+- Updated dependencies [89332d5]
+- Updated dependencies [f562a1f]
+- Updated dependencies [b5ada4d]
+- Updated dependencies [8934d8a]
+  - cojson@0.20.0
+
 ## 0.19.22
 
 ### Patch Changes

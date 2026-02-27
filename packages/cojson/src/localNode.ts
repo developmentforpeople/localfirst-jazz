@@ -27,6 +27,7 @@ import {
 import {
   type InviteSecret,
   type RawGroup,
+  formatGroupSealerValue,
   secretSeedFromInviteSecret,
 } from "./coValues/group.js";
 import { CO_VALUE_LOADING_CONFIG } from "./config.js";
@@ -39,7 +40,7 @@ import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromS
 import { expectGroup } from "./typeUtils/expectGroup.js";
 import { canBeBranched } from "./coValueCore/branching.js";
 import { connectedPeers } from "./streamUtils.js";
-import { emptyKnownState } from "./knownState.js";
+import { CoValueKnownState, emptyKnownState } from "./knownState.js";
 
 /** A `LocalNode` represents a local view of a set of loaded `CoValue`s, from the perspective of a particular account (or primitive cryptographic agent).
 
@@ -76,10 +77,14 @@ export class LocalNode {
     currentSessionID: SessionID,
     crypto: CryptoProvider,
     public readonly syncWhen?: SyncWhen,
+    enableFullStorageReconciliation?: boolean,
   ) {
     this.agentSecret = agentSecret;
     this.currentSessionID = currentSessionID;
     this.crypto = crypto;
+    if (enableFullStorageReconciliation) {
+      this.syncManager.fullStorageReconciliationEnabled = true;
+    }
   }
 
   enableGarbageCollector() {
@@ -87,7 +92,7 @@ export class LocalNode {
       return;
     }
 
-    this.garbageCollector = new GarbageCollector(this.coValues);
+    this.garbageCollector = new GarbageCollector(this);
   }
 
   setStorage(storage: StorageAPI) {
@@ -101,6 +106,21 @@ export class LocalNode {
     this.syncManager.removeStorage();
   }
 
+  /**
+   * Enable background erasure of deleted coValues (space reclamation).
+   *
+   * Deleted coValues are immediately blocked from syncing via tombstones; this feature
+   * only reclaims local storage space by deleting historical content while preserving
+   * the tombstone (header + delete session).
+   *
+   * This is opt-in and affects only the currently configured storage (if any)
+   *
+   * @category 3. Low-level
+   */
+  enableDeletedCoValuesErasure() {
+    this.storage?.enableDeletedCoValuesErasure();
+  }
+
   hasCoValue(id: RawCoID) {
     const coValue = this.coValues.get(id);
 
@@ -108,7 +128,19 @@ export class LocalNode {
       return false;
     }
 
-    return coValue.loadingState !== "unknown";
+    const state = coValue.loadingState;
+    // garbageCollected and onlyKnownState shells don't have actual content loaded
+    return (
+      state !== "unknown" &&
+      state !== "garbageCollected" &&
+      state !== "onlyKnownState"
+    );
+  }
+
+  isCoValueInMemory(id: RawCoID) {
+    const state = this.coValues.get(id)?.loadingState;
+
+    return Boolean(state);
   }
 
   getCoValue(id: RawCoID) {
@@ -128,9 +160,62 @@ export class LocalNode {
     return this.coValues.values();
   }
 
+  /**
+   * Simple delete of a CoValue from memory.
+   * Used for testing and forced cleanup scenarios.
+   * @internal
+   */
   internalDeleteCoValue(id: RawCoID) {
     this.coValues.delete(id);
     this.storage?.onCoValueUnmounted(id);
+  }
+
+  /**
+   * Unmount a CoValue from memory, keeping a shell with cached knownState.
+   * This enables accurate LOAD requests during peer reconciliation.
+   *
+   * @returns true if the coValue was successfully unmounted, false otherwise
+   */
+  internalUnmountCoValue(id: RawCoID): boolean {
+    const coValue = this.coValues.get(id);
+
+    if (!coValue) {
+      return false;
+    }
+
+    if (coValue.listeners.size > 0) {
+      // The coValue is still in use
+      return false;
+    }
+
+    for (const dependant of coValue.dependant) {
+      if (this.hasCoValue(dependant)) {
+        // Another in-memory coValue depends on this coValue
+        return false;
+      }
+    }
+
+    if (!this.syncManager.isSyncedToServerPeers(id)) {
+      return false;
+    }
+
+    // Cache the knownState before replacing
+    const lastKnownState = coValue.knownState();
+
+    // Handle counter: decrement old coValue's state
+    coValue.decrementLoadingStateCounter();
+
+    // Create new shell CoValueCore in garbageCollected state
+    const shell = new CoValueCore(id, this);
+    shell.setGarbageCollectedState(lastKnownState);
+
+    // Single map update (replacing old with shell)
+    this.coValues.set(id, shell);
+
+    // Notify storage
+    this.storage?.onCoValueUnmounted(id);
+
+    return true;
   }
 
   getCurrentAccountOrAgentID(): RawAccountID | AgentID {
@@ -181,6 +266,7 @@ export class LocalNode {
     peers?: Peer[];
     syncWhen?: SyncWhen;
     storage?: StorageAPI;
+    enableFullStorageReconciliation?: boolean;
   }): RawAccount {
     const {
       crypto,
@@ -199,6 +285,7 @@ export class LocalNode {
       crypto.newRandomSessionID(accountID as RawAccountID),
       crypto,
       syncWhen,
+      opts.enableFullStorageReconciliation,
     );
 
     if (opts.storage) {
@@ -245,6 +332,7 @@ export class LocalNode {
     crypto,
     initialAgentSecret = crypto.newRandomAgentSecret(),
     storage,
+    enableFullStorageReconciliation,
   }: {
     creationProps: { name: string };
     peers?: Peer[];
@@ -253,6 +341,7 @@ export class LocalNode {
     crypto: CryptoProvider;
     initialAgentSecret?: AgentSecret;
     storage?: StorageAPI;
+    enableFullStorageReconciliation?: boolean;
   }): Promise<{
     node: LocalNode;
     accountID: RawAccountID;
@@ -265,6 +354,7 @@ export class LocalNode {
       peers,
       syncWhen,
       storage,
+      enableFullStorageReconciliation,
     });
     const node = account.core.node;
 
@@ -310,6 +400,7 @@ export class LocalNode {
     crypto,
     migration,
     storage,
+    enableFullStorageReconciliation,
   }: {
     accountID: RawAccountID;
     accountSecret: AgentSecret;
@@ -319,6 +410,7 @@ export class LocalNode {
     crypto: CryptoProvider;
     migration?: RawAccountMigration<AccountMeta>;
     storage?: StorageAPI;
+    enableFullStorageReconciliation?: boolean;
   }): Promise<LocalNode> {
     try {
       const expectedAgentID = crypto.getAgentID(accountSecret);
@@ -328,6 +420,7 @@ export class LocalNode {
         sessionID || crypto.newRandomSessionID(accountID),
         crypto,
         syncWhen,
+        enableFullStorageReconciliation,
       );
 
       if (storage) {
@@ -434,7 +527,9 @@ export class LocalNode {
 
       if (
         coValue.loadingState === "unknown" ||
-        coValue.loadingState === "unavailable"
+        coValue.loadingState === "unavailable" ||
+        coValue.loadingState === "garbageCollected" ||
+        coValue.loadingState === "onlyKnownState"
       ) {
         const peers = this.syncManager.getServerPeers(id, skipLoadingFromPeer);
 
@@ -748,13 +843,19 @@ export class LocalNode {
 
   createGroup(
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
+    options?: { name?: string },
   ): RawGroup {
     const account = this.getCurrentAgent();
+
+    const meta =
+      options?.name != null && options.name !== ""
+        ? { name: options.name }
+        : null;
 
     const groupCoValue = this.createCoValue({
       type: "comap",
       ruleset: { type: "group", initialAdmin: account.id },
-      meta: null,
+      meta,
       ...(uniqueness.createdAt !== undefined
         ? { createdAt: uniqueness.createdAt }
         : {}),
@@ -782,6 +883,15 @@ export class LocalNode {
     );
 
     group.set("readKey", readKey.id, "trusting");
+
+    // Initialize the group sealer (derived deterministically from the read key)
+    // Store composite value with readKeyID for deterministic readKey association
+    const groupSealer = this.crypto.groupSealerFromReadKey(readKey.secret);
+    group.set(
+      "groupSealer",
+      formatGroupSealerValue(readKey.id, groupSealer.publicKey),
+      "trusting",
+    );
 
     return group;
   }

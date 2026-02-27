@@ -29,7 +29,13 @@ import {
   setActiveAccount,
   setupJazzTestSync,
 } from "../testing.js";
-import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
+import {
+  assertLoaded,
+  expectValidationError,
+  setupTwoNodes,
+  waitFor,
+} from "./utils.js";
+import { setDefaultValidationMode } from "../implementation/zodSchema/validationSettings.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -96,6 +102,7 @@ describe("CoMap", async () => {
       const john = Person.create({ name: "John" });
 
       expect("name" in john).toEqual(true);
+      // "age" is not in the schema, so `in` returns false
       expect("age" in john).toEqual(false);
     });
 
@@ -172,12 +179,15 @@ describe("CoMap", async () => {
 
       const dog = Dog.create({ name: "Rex" });
 
-      const person = Person.create({
-        name: "John",
-        age: 20,
-        // @ts-expect-error - This is an hack to test the behavior
-        dog: { $jazz: { id: dog.$jazz.id } },
-      });
+      const person = Person.create(
+        {
+          name: "John",
+          age: 20,
+          // @ts-expect-error - This is an hack to test the behavior
+          dog: { $jazz: { id: dog.$jazz.id } },
+        },
+        { validation: "loose" },
+      );
 
       expect(person.dog?.name).toEqual("Rex");
     });
@@ -414,6 +424,43 @@ describe("CoMap", async () => {
       });
     });
 
+    test("co.map with nested co.record should toJSON correctly", async () => {
+      const Chat = co.map({
+        title: z.string(),
+      });
+
+      const ChatRoot = co.map({
+        chats: co.record(z.string(), Chat),
+      });
+
+      const chat = Chat.create({ title: "General" });
+      const root = ChatRoot.create({
+        chats: {
+          general: chat,
+        },
+      });
+
+      // Simulate loading in another context/component
+      const loadedRoot = await ChatRoot.load(root.$jazz.id, {
+        resolve: {
+          chats: true,
+        },
+      });
+
+      if (!loadedRoot || !loadedRoot.$isLoaded)
+        throw new Error("Failed to load root");
+
+      expect(loadedRoot.toJSON()).toEqual(
+        expect.objectContaining({
+          chats: expect.objectContaining({
+            general: expect.objectContaining({
+              title: "General",
+            }),
+          }),
+        }),
+      );
+    });
+
     test("setting optional date as undefined should not throw", () => {
       const Person = co.map({
         name: z.string(),
@@ -438,8 +485,11 @@ describe("CoMap", async () => {
         age: z.number(),
       });
 
-      // @ts-expect-error - x is not a valid property
-      const john = Person.create({ name: "John", age: 30, x: 1 });
+      const john = Person.create(
+        // @ts-expect-error - x is not a valid property
+        { name: "John", age: 30, x: 1 },
+        { validation: "loose" },
+      );
 
       expect(john.toJSON()).toEqual({
         $jazz: { id: john.$jazz.id },
@@ -515,6 +565,114 @@ describe("CoMap", async () => {
 
       expect(personB.friend?.pet.name).toEqual("Rex");
     });
+
+    it("should throw when creating with invalid properties", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      expectValidationError(() =>
+        Person.create({
+          name: "John",
+          // @ts-expect-error - age should be a number
+          age: "20",
+        }),
+      );
+    });
+
+    it("should not throw when creating with invalid properties with loose validation", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      expect(() =>
+        Person.create(
+          {
+            name: "John",
+            // @ts-expect-error - age should be a number
+            age: "20",
+          },
+          { validation: "loose" },
+        ),
+      ).not.toThrow();
+    });
+
+    it("should throw when creating with extra properties", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      expectValidationError(() =>
+        Person.create({
+          name: "John",
+          age: 20,
+          // @ts-expect-error - extra is not a valid property
+          extra: "extra",
+        }),
+      );
+    });
+
+    it("should validate Group schemas", async () => {
+      const Person = co.map({
+        group: co.group(),
+        group2: Group,
+      });
+
+      expect(() =>
+        Person.create({ group: Group.create(), group2: Group.create() }),
+      ).not.toThrow();
+      expect(() =>
+        // @ts-expect-error - group should be a Group
+        Person.create({ group: "Test", group2: Group.create() }),
+      ).toThrow();
+      expect(() =>
+        // @ts-expect-error - group should be a Group
+        Person.create({ group: Group.create(), group2: "Test" }),
+      ).toThrow();
+    });
+
+    // .default() is not supported yet
+    it.fails("should use zod defaults for plain items", async () => {
+      const Person = co.map({
+        name: z.string().default("John"),
+        age: z.number().default(20),
+      });
+
+      // @ts-expect-error - name and age are required but have defaults
+      const person = Person.create({});
+      expect(person.name).toEqual("John");
+      expect(person.age).toEqual(20);
+    });
+
+    test("CoMap validation should never validate a coValue instance as a plain object", () => {
+      const Dog = co.list(z.string());
+
+      const Person = co.map({
+        pet: co.map({
+          name: z.string(),
+        }),
+      });
+
+      const dog = Dog.create(["Rex"]);
+
+      expectValidationError(
+        () =>
+          Person.create({
+            // @ts-expect-error - pet should be a CoMap
+            pet: dog,
+          }),
+        [
+          {
+            code: "custom",
+            message: "Expected a CoMap when providing a CoValue instance",
+            path: ["pet"],
+          },
+        ],
+      );
+    });
   });
 
   describe("Mutation", () => {
@@ -530,6 +688,41 @@ describe("CoMap", async () => {
 
       expect(john.name).toEqual("Jane");
       expect(john.age).toEqual(20);
+    });
+
+    test("change a primitive value should be validated", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      const john = Person.create({ name: "John", age: 20 });
+
+      expectValidationError(() =>
+        john.$jazz.set("age", "21" as unknown as number),
+      );
+
+      expect(john.age).toEqual(20);
+    });
+
+    test("change a primitive value should not throw if validation is loose", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      const john = Person.create({ name: "John", age: 20 });
+
+      expect(() =>
+        john.$jazz.set(
+          "age",
+          // @ts-expect-error - age should be a number
+          "21",
+          { validation: "loose" },
+        ),
+      ).not.toThrow();
+
+      expect(john.age).toEqual("21");
     });
 
     test("delete an optional value by setting it to undefined", () => {
@@ -549,8 +742,11 @@ describe("CoMap", async () => {
         $jazz: { id: john.$jazz.id },
         name: "John",
       });
-      // The CoMap proxy hides the age property from the `in` operator
-      expect("age" in john).toEqual(false);
+      // `in` returns true for schema-defined keys even when value is undefined,
+      // to satisfy proxy invariant consistency with ownKeys/getOwnPropertyDescriptor.
+      expect("age" in john).toEqual(true);
+      // $jazz.has() returns true because age was explicitly set (even to undefined)
+      expect(john.$jazz.has("age")).toEqual(true);
       // The key still exists, since age === undefined
       expect(Object.keys(john)).toEqual(["name", "age"]);
     });
@@ -581,8 +777,12 @@ describe("CoMap", async () => {
         $jazz: { id: john.$jazz.id },
         name: "John",
       });
-      expect("age" in john).toEqual(false);
-      expect("pet" in john).toEqual(false);
+      // `in` returns true for schema-defined keys even after deletion.
+      // Use $jazz.has() to check if a key has a set value.
+      expect("age" in john).toEqual(true);
+      expect("pet" in john).toEqual(true);
+      expect(john.$jazz.has("age")).toEqual(false);
+      expect(john.$jazz.has("pet")).toEqual(false);
       expect(Object.keys(john)).toEqual(["name"]);
     });
 
@@ -882,6 +1082,94 @@ describe("CoMap", async () => {
       expect(loadedPerson.name.$jazz.loadingState).toBe(
         CoValueLoadingState.LOADING,
       );
+    });
+  });
+
+  describe("proxy invariant consistency", () => {
+    test("has trap is consistent with ownKeys for schema-defined keys", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number().optional(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      // ownKeys includes "age" via the schema even though it was never set
+      const ownKeys = Object.keys(person);
+
+      // `in` must return true for all keys reported by ownKeys
+      for (const key of ownKeys) {
+        expect(key in person).toBe(true);
+      }
+
+      // "age" is schema-defined, so `in` returns true even when unset
+      expect("age" in person).toBe(true);
+      // but $jazz.has() correctly reports it as unset
+      expect(person.$jazz.has("age")).toBe(false);
+    });
+
+    test("has trap is consistent with getOwnPropertyDescriptor", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number().optional(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      // getOwnPropertyDescriptor returns a descriptor for schema-defined keys
+      const ageDescriptor = Object.getOwnPropertyDescriptor(person, "age");
+      expect(ageDescriptor).toBeDefined();
+
+      // has trap must agree — if a descriptor exists, `in` must return true
+      expect("age" in person).toBe(true);
+    });
+
+    test("has trap returns false for keys not in schema", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      expect("nonExistent" in person).toBe(false);
+    });
+
+    test("internal properties are configurable", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      // $isLoaded must be configurable to satisfy proxy invariants
+      const isLoadedDesc = Object.getOwnPropertyDescriptor(person, "$isLoaded");
+      expect(isLoadedDesc).toBeDefined();
+      expect(isLoadedDesc!.configurable).toBe(true);
+    });
+
+    test("$jazz.has() is unaffected by has trap changes", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number().optional(),
+        bio: z.string().optional(),
+      });
+
+      const person = Person.create({ name: "John", age: 20 });
+
+      // $jazz.has() returns true only for keys with set values
+      expect(person.$jazz.has("name")).toBe(true);
+      expect(person.$jazz.has("age")).toBe(true);
+      expect(person.$jazz.has("bio")).toBe(false);
+
+      // `in` returns true for all schema-defined keys
+      expect("name" in person).toBe(true);
+      expect("age" in person).toBe(true);
+      expect("bio" in person).toBe(true);
+
+      // Delete age — $jazz.has() reflects deletion, `in` does not
+      person.$jazz.delete("age");
+      expect(person.$jazz.has("age")).toBe(false);
+      expect("age" in person).toBe(true);
     });
   });
 
@@ -1533,6 +1821,43 @@ describe("CoMap resolution", async () => {
 
     expect(spy).toHaveBeenCalledTimes(2);
   });
+
+  test("loading a locally available map with invalid data", async () => {
+    const Person1 = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const Person2 = co.map({
+      name: z.string(),
+      age: z.string(),
+    });
+
+    const person1 = Person1.create({ name: "John", age: 20 });
+    person1.$jazz.waitForSync();
+
+    const person2 = await Person2.load(person1.$jazz.id);
+
+    assertLoaded(person2);
+    expect(person2.age).toStrictEqual(20);
+  });
+
+  test("loaded CoMap keeps schema validation", async () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const person1 = Person.create({ name: "John", age: 20 });
+    // person1.$jazz.waitForSync();
+
+    const person2 = await Person.load(person1.$jazz.id);
+
+    assertLoaded(person2);
+    expectValidationError(() =>
+      person2.$jazz.set("age", "20" as unknown as number),
+    );
+  });
 });
 
 describe("CoMap applyDiff", async () => {
@@ -1580,6 +1905,56 @@ describe("CoMap applyDiff", async () => {
     expect(map.isActive).toEqual(false);
     expect(map.birthday).toEqual(new Date("1990-01-01"));
     expect(map.nested?.value).toEqual("original");
+  });
+
+  test("Basic applyDiff should validate", () => {
+    const map = TestMap.create(
+      {
+        name: "Alice",
+        age: 30,
+        isActive: true,
+        birthday: new Date("1990-01-01"),
+        nested: NestedMap.create({ value: "original" }, { owner: me }),
+      },
+      { owner: me },
+    );
+
+    const newValues = {
+      age: "35",
+    };
+
+    // @ts-expect-error - age should be a number
+    expect(() => map.$jazz.applyDiff(newValues)).toThrow();
+
+    expect(map.name).toEqual("Alice");
+    expect(map.age).toEqual(30);
+    expect(map.isActive).toEqual(true);
+    expect(map.birthday).toEqual(new Date("1990-01-01"));
+    expect(map.nested?.value).toEqual("original");
+  });
+
+  test("Basic applyDiff should not validate if validation is loose", () => {
+    const map = TestMap.create(
+      {
+        name: "Alice",
+        age: 30,
+        isActive: true,
+        birthday: new Date("1990-01-01"),
+        nested: NestedMap.create({ value: "original" }, { owner: me }),
+      },
+      { owner: me },
+    );
+
+    const newValues = {
+      age: "35",
+    };
+
+    expect(() =>
+      // @ts-expect-error - age should be a number
+      map.$jazz.applyDiff(newValues, { validation: "loose" }),
+    ).not.toThrow();
+
+    expect(map.age).toEqual("35");
   });
 
   test("applyDiff with nested changes", () => {
@@ -1738,9 +2113,7 @@ describe("CoMap applyDiff", async () => {
       nested: undefined,
     };
 
-    expect(() => map.$jazz.applyDiff(newValues)).toThrowError(
-      "Cannot set required reference nested to undefined",
-    );
+    expect(() => map.$jazz.applyDiff(newValues)).toThrow();
   });
 
   test("applyDiff from JSON", () => {
@@ -2088,7 +2461,7 @@ describe("CoMap migration", () => {
     expect(loadedPersonFromAnotherAccount.name).toEqual("Bob");
   });
 
-  test("should throw an error if a migration is async", async () => {
+  test("should return unavailable if a migration is async", async () => {
     const Person = co
       .map({
         name: z.string(),
@@ -2102,9 +2475,51 @@ describe("CoMap migration", () => {
       version: 1,
     });
 
-    await expect(Person.load(person.$jazz.id)).rejects.toThrow(
-      "Migration function cannot be async",
+    const loaded = await Person.load(person.$jazz.id);
+    expect(loaded.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
+  });
+
+  test("should return unavailable when migration tries to create content as reader", async () => {
+    const Extra = co.map({
+      value: z.string(),
+    });
+
+    const Person = co
+      .map({
+        name: z.string(),
+        version: z.literal([1, 2]),
+        extra: Extra.optional(),
+      })
+      .withMigration((person) => {
+        if (person.version === 1) {
+          person.$jazz.set(
+            "extra",
+            Extra.create(
+              {
+                value: "created in migration",
+              },
+              person.$jazz.owner,
+            ),
+          );
+          person.$jazz.set("version", 2);
+        }
+      });
+
+    const group = Group.create();
+    const person = Person.create(
+      {
+        name: "Bob",
+        version: 1,
+      },
+      group,
     );
+
+    group.addMember("everyone", "reader");
+    const reader = await createJazzTestAccount();
+    const loaded = await Person.load(person.$jazz.id, {
+      loadAs: reader,
+    });
+    expect(loaded.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("should run only once", async () => {
@@ -2321,7 +2736,12 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
   test("empty map created time", () => {
     const emptyMap = co.map({}).create({});
 
-    expect(emptyMap.$jazz.lastUpdatedAt).toEqual(emptyMap.$jazz.createdAt);
+    expect(emptyMap.$jazz.createdAt).toEqual(
+      new Date(emptyMap.$jazz.raw.core.verified.header.createdAt!).getTime(),
+    );
+
+    const lastTx = emptyMap.$jazz.raw.core.verifiedTransactions.at(-1);
+    expect(emptyMap.$jazz.lastUpdatedAt).toEqual(lastTx!.madeAt);
   });
 
   test("empty map created by", () => {
@@ -2339,7 +2759,9 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
     const person = Person.create({ name: "John" });
 
     const createdAt = person.$jazz.createdAt;
-    expect(person.$jazz.lastUpdatedAt).toEqual(createdAt);
+    const setNameJohnTx = person.$jazz.raw.core.verifiedTransactions[0];
+    expect(person.$jazz.createdAt).toEqual(createdAt);
+    expect(person.$jazz.lastUpdatedAt).toEqual(setNameJohnTx!.madeAt);
 
     const createdBy = person.$jazz.createdBy;
     expect(createdBy).toEqual(me.$jazz.id);
@@ -2347,8 +2769,9 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
     await new Promise((r) => setTimeout(r, 10));
     person.$jazz.set("name", "Jane");
 
+    const setNameJaneTx = person.$jazz.raw.core.verifiedTransactions[1];
     expect(person.$jazz.createdAt).toEqual(createdAt);
-    expect(person.$jazz.lastUpdatedAt).not.toEqual(createdAt);
+    expect(person.$jazz.lastUpdatedAt).toEqual(setNameJaneTx!.madeAt);
 
     // Double check after update.
     expect(createdBy).toEqual(me.$jazz.id);
@@ -2699,5 +3122,263 @@ describe("Updating a nested reference", () => {
       playSelection.$jazz.id,
     );
     expect(loadedGame.player1.playSelection.value).toEqual("scissors");
+  });
+});
+
+describe("nested CoValue validation mode propagation", () => {
+  test("create with nested CoValue - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
+
+    // Should throw with default strict validation when age is a string
+    expectValidationError(() =>
+      Person.create({
+        name: "john",
+        dog: { age: "12" as unknown as number },
+      }),
+    );
+
+    // Should not throw with loose validation even though age is invalid
+    expect(() =>
+      Person.create(
+        {
+          name: "john",
+          dog: { age: "12" as unknown as number },
+        },
+        { validation: "loose" },
+      ),
+    ).not.toThrow();
+
+    const person = Person.create(
+      {
+        name: "john",
+        dog: { age: "12" as unknown as number },
+      },
+      { validation: "loose" },
+    );
+
+    // Verify the nested CoValue was created with invalid data
+    expect(person.name).toBe("john");
+    expect(person.dog).toBeDefined();
+    expect(person.dog.age).toBe("12");
+  });
+
+  test("set with nested CoValue - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
+
+    const person = Person.create({
+      name: "john",
+      dog: { age: 5 },
+    });
+
+    // Should throw with default strict validation
+    expectValidationError(() =>
+      person.$jazz.set("dog", {
+        age: "invalid" as unknown as number,
+      }),
+    );
+
+    // Should not throw with loose validation
+    expect(() =>
+      person.$jazz.set(
+        "dog",
+        {
+          age: "invalid" as unknown as number,
+        },
+        { validation: "loose" },
+      ),
+    ).not.toThrow();
+
+    // Verify the nested CoValue was created with invalid data
+    expect(person.dog.age).toBe("invalid");
+  });
+
+  test("applyDiff with nested CoValue - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
+
+    const person = Person.create({
+      name: "john",
+      dog: { age: 5 },
+    });
+
+    // Should throw with default strict validation
+    expectValidationError(() =>
+      person.$jazz.applyDiff({
+        dog: { age: "string" as unknown as number },
+      }),
+    );
+
+    // Should not throw with loose validation
+    expect(() =>
+      person.$jazz.applyDiff(
+        {
+          dog: { age: "string" as unknown as number },
+        },
+        { validation: "loose" },
+      ),
+    ).not.toThrow();
+
+    // Verify the nested CoValue was updated with invalid data
+    expect(person.dog.age).toBe("string");
+  });
+
+  test("create with deeply nested CoValues - loose validation should not throw", () => {
+    const Collar = co.map({
+      size: z.number(),
+    });
+    const Dog = co.map({
+      age: z.number(),
+      collar: Collar,
+    });
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
+
+    // Should throw with strict validation when any nested field is invalid
+    expectValidationError(() =>
+      Person.create({
+        name: "john",
+        dog: {
+          age: "12" as unknown as number,
+          collar: { size: 10 },
+        },
+      }),
+    );
+
+    expectValidationError(() =>
+      Person.create({
+        name: "john",
+        dog: {
+          age: 12,
+          // @ts-expect-error - size should be number
+          collar: { size: "large" },
+        },
+      }),
+    );
+
+    // Should not throw with loose validation at any level
+    expect(() =>
+      Person.create(
+        {
+          name: "john",
+          dog: {
+            age: "12" as unknown as number,
+            collar: { size: "large" as unknown as number },
+          },
+        },
+        { validation: "loose" },
+      ),
+    ).not.toThrow();
+
+    const person = Person.create(
+      {
+        name: "john",
+        dog: {
+          age: "12" as unknown as number,
+          collar: { size: "large" as unknown as number },
+        },
+      },
+      { validation: "loose" },
+    );
+
+    // Verify all levels were created with invalid data
+    expect(person.name).toBe("john");
+    expect(person.dog.age).toBe("12");
+    expect(person.dog.collar.size).toBe("large");
+  });
+
+  test("create with nested CoValue - strict validation explicitly set should throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
+
+    // Explicitly setting validation to strict should throw
+    expectValidationError(() =>
+      Person.create(
+        {
+          name: "john",
+          dog: { age: "12" as unknown as number },
+        },
+        { validation: "strict" },
+      ),
+    );
+  });
+
+  test("global loose validation mode propagates to nested CoValues in all mutations", () => {
+    const Collar = co.map({
+      size: z.number(),
+    });
+    const Dog = co.map({
+      age: z.number(),
+      collar: Collar,
+    });
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
+
+    // Set global validation mode to loose
+    setDefaultValidationMode("loose");
+
+    try {
+      // Test 1: Create with deeply nested invalid data
+      const person = Person.create({
+        name: "john",
+        dog: {
+          age: "12" as unknown as number,
+          collar: { size: "large" as unknown as number },
+        },
+      });
+
+      // Verify all nested levels were created with invalid data
+      expect(person.name).toBe("john");
+      expect(person.dog.age).toBe("12");
+      expect(person.dog.collar.size).toBe("large");
+
+      // Test 2: Set with nested invalid data
+      person.$jazz.set("dog", {
+        age: "15" as unknown as number,
+        collar: { size: "medium" as unknown as number },
+      });
+
+      expect(person.dog.age).toBe("15");
+      expect(person.dog.collar.size).toBe("medium");
+
+      // Test 3: ApplyDiff with nested invalid data
+      person.$jazz.applyDiff({
+        dog: {
+          age: "20" as unknown as number,
+          collar: { size: "small" as unknown as number },
+        },
+      });
+
+      expect(person.dog.age).toBe("20");
+      expect(person.dog.collar.size).toBe("small");
+    } finally {
+      // Reset to strict mode
+      setDefaultValidationMode("strict");
+    }
   });
 });

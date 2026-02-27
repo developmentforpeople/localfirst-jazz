@@ -1,3 +1,4 @@
+import { CoValueUniqueness } from "cojson";
 import {
   Account,
   AnyZodOrCoValueSchema,
@@ -9,11 +10,13 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
+  SubscribeCallback,
   SubscribeListenerOptions,
   coOptionalDefiner,
-  parseSubscribeRestArgs,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  type Schema,
+  CoValueCreateOptions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
@@ -26,6 +29,12 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
+import {
+  coValueValidationSchema,
+  generateValidationSchemaFromItem,
+} from "./schemaValidators.js";
+import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -34,6 +43,7 @@ export class CoFeedSchema<
 {
   collaborative = true as const;
   builtin = "CoFeed" as const;
+  #descriptorsSchema: Schema | undefined = undefined;
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -42,29 +52,56 @@ export class CoFeedSchema<
    */
   resolveQuery: DefaultResolveQuery = true as DefaultResolveQuery;
 
+  #permissions: SchemaPermissions | null = null;
   /**
    * Permissions to be used when creating or composing CoValues
    * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
+
+  #validationSchema: z.ZodType | undefined = undefined;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const validationSchema = z.array(
+      generateValidationSchemaFromItem(this.element),
+    );
+
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoFeed);
+    return this.#validationSchema;
+  };
 
   constructor(
     public element: T,
     private coValueClass: typeof CoFeed,
   ) {}
 
+  getDescriptorsSchema = (): Schema => {
+    if (this.#descriptorsSchema) {
+      return this.#descriptorsSchema;
+    }
+
+    this.#descriptorsSchema = resolveSchemaField(this.element as any);
+
+    return this.#descriptorsSchema;
+  };
+
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Group } | Group,
+    options?: CoValueCreateOptions,
   ): CoFeedInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Account | Group } | Account | Group,
+    options: CoValueCreateOptions<{}, Account | Group>,
   ): CoFeedInstance<T>;
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Account | Group } | Account | Group,
+    options?: CoValueCreateOptions<{}, Account | Group>,
   ): CoFeedInstance<T> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
@@ -118,12 +155,16 @@ export class CoFeedSchema<
     );
   }
 
-  subscribe(
+  subscribe<
+    const R extends RefsToResolve<
+      CoFeedInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(
     id: string,
-    listener: (
-      value: Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, true>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>
+    >,
   ): () => void;
   subscribe<
     const R extends RefsToResolve<
@@ -133,23 +174,74 @@ export class CoFeedSchema<
   >(
     id: string,
     options: SubscribeListenerOptions<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
-    listener: (
-      value: Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>
+    >,
   ): () => void;
-  subscribe(id: string, ...args: any) {
-    const { options, listener } = parseSubscribeRestArgs(args);
+  subscribe<
+    const R extends RefsToResolve<CoFeedInstanceCoValuesMaybeLoaded<T>>,
+  >(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<CoFeedInstanceCoValuesMaybeLoaded<T>, R>
+      | SubscribeCallback<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>,
+    maybeListener?: SubscribeCallback<
+      Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>
+    >,
+  ): () => void {
+    if (typeof optionsOrListener === "function") {
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        optionsOrListener,
+      );
+    }
     return this.coValueClass.subscribe(
       id,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
       // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      maybeListener,
     );
   }
 
   getCoValueClass(): typeof CoFeed {
     return this.coValueClass;
+  }
+
+  /**
+   * Get an existing unique CoFeed or create a new one if it doesn't exist.
+   *
+   * The provided value is only used when creating a new CoFeed.
+   *
+   * @example
+   * ```ts
+   * const feed = await MessageFeed.getOrCreateUnique({
+   *   value: [],
+   *   unique: ["messages", conversationId],
+   *   owner: group,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoFeed.
+   * @returns Either an existing CoFeed (unchanged), or a new initialised CoFeed if none exists.
+   * @category Subscription & Loading
+   */
+  getOrCreateUnique<
+    const R extends RefsToResolve<
+      CoFeedInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(options: {
+    value: CoFeedSchemaInit<T>;
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Account | Group;
+    resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesMaybeLoaded<T>, R>;
+  }): Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
+    // @ts-expect-error
+    return this.coValueClass.getOrCreateUnique(
+      // @ts-expect-error
+      withSchemaResolveQuery(options, this.resolveQuery),
+    );
   }
 
   optional(): CoOptionalSchema<this> {
@@ -190,7 +282,7 @@ export class CoFeedSchema<
       hydrateCoreCoValueSchema(coreSchema);
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
-    copy.permissions = permissions ?? this.permissions;
+    copy.#permissions = permissions ?? this.#permissions;
     return copy;
   }
 }
@@ -198,11 +290,23 @@ export class CoFeedSchema<
 export function createCoreCoFeedSchema<T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoreCoFeedSchema<T> {
+  let descriptorsSchema: Schema | undefined;
+
   return {
     collaborative: true as const,
     builtin: "CoFeed" as const,
     element,
+    getDescriptorsSchema: () => {
+      if (descriptorsSchema) {
+        return descriptorsSchema;
+      }
+
+      descriptorsSchema = resolveSchemaField(element as any);
+
+      return descriptorsSchema;
+    },
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -212,6 +316,7 @@ export interface CoreCoFeedSchema<
 > extends CoreCoValueSchema {
   builtin: "CoFeed";
   element: T;
+  getDescriptorsSchema: () => Schema;
 }
 
 export type CoFeedInstance<T extends AnyZodOrCoValueSchema> = CoFeed<

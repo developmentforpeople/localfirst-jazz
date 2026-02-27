@@ -6,6 +6,23 @@ import { SQLiteDatabaseDriverAsync, getSqliteStorageAsync } from "cojson";
 import Database, { type Database as DatabaseT } from "libsql";
 import { onTestFinished } from "vitest";
 
+/** Cleanup functions registered by createAsyncStorage; run by the runner hook (registered first so it runs last). */
+const storageCleanupFns: Array<() => void | Promise<void>> = [];
+
+function registerStorageCleanup(fn: () => void | Promise<void>): void {
+  storageCleanupFns.push(fn);
+}
+
+/** Call from beforeEach so this hook is registered first and thus runs last (LIFO), after node shutdown hooks. */
+export function registerStorageCleanupRunner(): void {
+  // Clear cleanup functions from previous test
+  storageCleanupFns.length = 0;
+  onTestFinished(async () => {
+    for (const fn of storageCleanupFns) {
+      await fn();
+    }
+  });
+}
 class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
   private readonly db: DatabaseT;
 
@@ -29,14 +46,15 @@ class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
     return this.db.prepare(sql).get(params) as T | undefined;
   }
 
-  async transaction(callback: () => unknown) {
+  async transaction(callback: (tx: LibSQLSqliteAsyncDriver) => unknown) {
     await this.run("BEGIN TRANSACTION", []);
 
     try {
-      await callback();
+      await callback(this);
       await this.run("COMMIT", []);
     } catch (error) {
       await this.run("ROLLBACK", []);
+      throw error;
     }
   }
 
@@ -45,26 +63,37 @@ class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
   }
 }
 
+function unlinkIfExists(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    if (err?.code !== "ENOENT") {
+      console.error(error);
+    }
+  }
+}
+
+function deleteDb(dbPath: string): void {
+  unlinkIfExists(dbPath);
+  unlinkIfExists(`${dbPath}-wal`);
+  unlinkIfExists(`${dbPath}-shm`);
+}
+
 export async function createAsyncStorage({ filename }: { filename?: string }) {
+  const dbPath = getDbPath(filename);
   const storage = await getSqliteStorageAsync(
-    new LibSQLSqliteAsyncDriver(getDbPath(filename)),
+    new LibSQLSqliteAsyncDriver(dbPath),
   );
 
-  onTestFinished(async () => {
+  registerStorageCleanup(async () => {
     await storage.close();
+    deleteDb(dbPath);
   });
 
   return storage;
 }
 
 export function getDbPath(defaultDbPath?: string) {
-  const dbPath = defaultDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
-
-  if (!defaultDbPath) {
-    onTestFinished(() => {
-      unlinkSync(dbPath);
-    });
-  }
-
-  return dbPath;
+  return defaultDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
 }

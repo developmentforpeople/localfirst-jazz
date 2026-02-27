@@ -1,10 +1,13 @@
 import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
 import type { PeerState } from "../PeerState.js";
 import type { RawCoValue } from "../coValue.js";
-import type { ControlledAccountOrAgent } from "../coValues/account.js";
+import type { LoadMode } from "../queue/OutgoingLoadQueue.js";
+import {
+  RawAccount,
+  type ControlledAccountOrAgent,
+} from "../coValues/account.js";
 import type { RawGroup } from "../coValues/group.js";
 import { CO_VALUE_LOADING_CONFIG } from "../config.js";
-import { validateTxSizeLimitInBytes } from "../coValueContentMessage.js";
 import { coreToCoValue } from "../coreToCoValue.js";
 import {
   CryptoProvider,
@@ -14,12 +17,18 @@ import {
   Signature,
   SignerID,
 } from "../crypto/crypto.js";
-import { AgentID, RawCoID, SessionID, TransactionID } from "../ids.js";
+import {
+  AgentID,
+  isDeleteSessionID,
+  RawCoID,
+  SessionID,
+  TransactionID,
+} from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { LocalNode, ResolveAccountAgentError } from "../localNode.js";
 import { logger } from "../logger.js";
 import { determineValidTransactions } from "../permissions.js";
-import { NewContentMessage, PeerID } from "../sync.js";
+import { KnownStateMessage, NewContentMessage, PeerID } from "../sync.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import {
@@ -28,7 +37,6 @@ import {
   getDependenciesFromHeader,
 } from "./utils.js";
 import { CoValueHeader, Transaction, VerifiedState } from "./verifiedState.js";
-import { SessionMap } from "./SessionMap.js";
 import {
   MergeCommit,
   BranchPointerCommit,
@@ -84,13 +92,17 @@ export class VerifiedTransaction {
   changes: JsonValue[] | undefined;
   // The decoded meta information of the transaction
   meta: JsonObject | undefined;
-  isValidated: boolean = false;
   // Whether the transaction is valid, as per membership rules
   isValid: boolean = false;
   // The error message that caused the transaction to be invalid
   validationErrorMessage: string | undefined = undefined;
   // The previous verified transaction for the same session
   previous: VerifiedTransaction | undefined;
+  // Transaction processing stage:
+  // - "to-validate": Transaction is pending validation on permissions checks
+  // - "validated": Transaction has been validated but not yet applied to content
+  // - "processed": Transaction has been validated and applied to content
+  stage: "to-validate" | "validated" | "processed" = "to-validate";
 
   constructor(
     coValueId: RawCoID,
@@ -161,18 +173,31 @@ export class VerifiedTransaction {
     return Boolean(this.isValid && this.changes);
   }
 
+  isProcessable(includeInvalidMetaTransactions: boolean): this is {
+    changes: JsonValue[];
+  } {
+    return Boolean(
+      this.changes && (includeInvalidMetaTransactions || this.isValid),
+    );
+  }
+
   markValid() {
+    const validityChanged = this.isValid === false;
     this.isValid = true;
     this.validationErrorMessage = undefined;
 
-    if (!this.isValidated) {
-      this.isValidated = true;
+    if (this.stage === "to-validate") {
+      this.stage = "validated";
+      this.dispatchTransaction(this);
+    }
+
+    if (this.stage === "processed" && validityChanged) {
       this.dispatchTransaction(this);
     }
   }
 
   markInvalid(errorMessage: string, attributes?: Record<string, JsonValue>) {
-    this.isValidated = true;
+    const validityChanged = this.isValid === true;
     this.isValid = false;
 
     this.validationErrorMessage = errorMessage;
@@ -184,6 +209,22 @@ export class VerifiedTransaction {
         ...attributes,
       });
     }
+
+    if (this.stage === "processed" && validityChanged) {
+      this.dispatchTransaction(this);
+    }
+
+    if (this.stage === "to-validate") {
+      this.stage = "validated";
+    }
+  }
+
+  markAsProcessed() {
+    this.stage = "processed";
+  }
+
+  markAsToValidate() {
+    this.stage = "to-validate";
   }
 }
 
@@ -197,6 +238,8 @@ export class CoValueCore {
   // context
   readonly node: LocalNode;
   private readonly crypto: CryptoProvider;
+  // Whether the coValue is deleted
+  public isDeleted: boolean = false;
 
   // state
   id: RawCoID;
@@ -227,6 +270,15 @@ export class CoValueCore {
       }
   >();
 
+  // Tracks why we have lastKnownState (separate from loadingStatuses)
+  // - "garbageCollected": was in memory, got GC'd
+  // - "onlyKnownState": checked storage, found knownState, but didn't load full content
+  #lastKnownStateSource?: "garbageCollected" | "onlyKnownState";
+
+  // Cache the knownState when transitioning to garbageCollected/onlyKnownState
+  // Used during peer reconciliation to send accurate LOAD requests
+  #lastKnownState?: CoValueKnownState;
+
   // cached state and listeners
   private _cachedContent?: RawCoValue;
   readonly listeners: Set<(core: CoValueCore, unsub: () => void) => void> =
@@ -253,14 +305,26 @@ export class CoValueCore {
   get loadingState() {
     if (this.verified) {
       return "available";
-    } else if (this.loadingStatuses.size === 0) {
+    }
+
+    // Check for lastKnownStateSource (garbageCollected or onlyKnownState)
+    if (this.#lastKnownStateSource) {
+      return this.#lastKnownStateSource;
+    }
+
+    // Check for pending peers FIRST - loading takes priority over other states
+    for (const peer of this.loadingStatuses.values()) {
+      if (peer.type === "pending") {
+        return "loading";
+      }
+    }
+
+    if (this.loadingStatuses.size === 0) {
       return "unknown";
     }
 
     for (const peer of this.loadingStatuses.values()) {
-      if (peer.type === "pending") {
-        return "loading";
-      } else if (peer.type === "unknown") {
+      if (peer.type === "unknown") {
         return "unknown";
       }
     }
@@ -274,6 +338,14 @@ export class CoValueCore {
 
   isAvailable(): this is AvailableCoValueCore {
     return this.hasVerifiedContent();
+  }
+
+  isKnownStateAvailable(): boolean {
+    return (
+      this.loadingState === "available" ||
+      this.loadingState === "onlyKnownState" ||
+      this.loadingState === "garbageCollected"
+    );
   }
 
   isCompletelyDownloaded(): boolean {
@@ -374,32 +446,22 @@ export class CoValueCore {
   }
 
   /**
-   * Removes the CoValue from memory.
+   * Removes the CoValue content from memory but keeps a shell with cached knownState.
+   * This enables accurate LOAD requests during peer reconciliation.
    *
    * @returns true if the coValue was successfully unmounted, false otherwise
    */
   unmount(): boolean {
-    if (this.listeners.size > 0) {
-      // The coValue is still in use
-      return false;
-    }
+    return this.node.internalUnmountCoValue(this.id);
+  }
 
-    for (const dependant of this.dependant) {
-      if (this.node.hasCoValue(dependant)) {
-        // Another in-memory coValue depends on this coValue
-        return false;
-      }
-    }
-
-    if (!this.node.syncManager.isSyncedToServerPeers(this.id)) {
-      return false;
-    }
-
+  /**
+   * Decrements the counter for the current loading state.
+   * Used during unmount to properly track state transitions.
+   * @internal
+   */
+  decrementLoadingStateCounter() {
     this.counter.add(-1, { state: this.loadingState });
-
-    this.node.internalDeleteCoValue(this.id);
-
-    return true;
   }
 
   markNotFoundInPeer(peerId: PeerID) {
@@ -413,6 +475,35 @@ export class CoValueCore {
     this.loadingStatuses.set(peerId, { type: "available" });
     this.updateCounter(previousState);
     this.scheduleNotifyUpdate();
+  }
+
+  /**
+   * Clean up cached state when CoValue becomes available.
+   * Called after the CoValue transitions from garbageCollected/onlyKnownState to available.
+   */
+  private cleanupLastKnownState() {
+    // Clear both fields - in-memory verified state is now authoritative
+    this.#lastKnownStateSource = undefined;
+    this.#lastKnownState = undefined;
+  }
+
+  /**
+   * Initialize this CoValueCore as a garbageCollected shell.
+   * Called when creating a replacement CoValueCore after unmounting.
+   */
+  setGarbageCollectedState(knownState: CoValueKnownState) {
+    // Only set garbageCollected state if storage is active
+    // Without storage, we can't reload the CoValue anyway
+    if (!this.node.storage) {
+      return;
+    }
+
+    // Transition counter from 'unknown' (set by constructor) to 'garbageCollected'
+    // previousState will be 'unknown', newState will be 'garbageCollected'
+    const previousState = this.loadingState;
+    this.#lastKnownStateSource = "garbageCollected";
+    this.#lastKnownState = knownState;
+    this.updateCounter(previousState);
   }
 
   missingDependencies = new Set<RawCoID>();
@@ -491,27 +582,38 @@ export class CoValueCore {
     streamingKnownState?: KnownStateSessions,
     skipVerify?: boolean,
   ) {
-    if (!skipVerify) {
-      const expectedId = idforHeader(header, this.node.crypto);
-
-      if (this.id !== expectedId) {
-        return false;
-      }
-    }
-
-    this.addDependencyFromHeader(header);
-
-    if (this._verified?.sessions.size) {
+    if (this._verified?.sessionCount) {
       throw new Error(
         "CoValueCore: provideHeader called on coValue with verified sessions present!",
       );
     }
-    this._verified = new VerifiedState(
-      this.id,
-      this.node.crypto,
-      header,
-      new SessionMap(this.id, this.node.crypto, streamingKnownState),
-    );
+
+    // Create VerifiedState - Rust validates uniqueness and id match unless skipVerify is true
+    try {
+      this._verified = new VerifiedState(
+        this.id,
+        this.node.crypto,
+        header,
+        streamingKnownState,
+        skipVerify,
+      );
+    } catch (e) {
+      // Rust validation failed (invalid uniqueness or id mismatch)
+      logger.error("Header validation failed", {
+        id: this.id,
+        header,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return false;
+    }
+
+    // Only add dependencies after successful validation
+    this.addDependencyFromHeader(header);
+
+    // Clean up if transitioning from garbageCollected/onlyKnownState
+    if (this.isAvailable()) {
+      this.cleanupLastKnownState();
+    }
 
     return true;
   }
@@ -542,21 +644,58 @@ export class CoValueCore {
    * Used to correctly manage the content & subscriptions during the content streaming process
    */
   knownStateWithStreaming(): CoValueKnownState {
-    return (
-      this.verified?.immutableKnownStateWithStreaming() ??
-      emptyKnownState(this.id)
-    );
+    if (this.verified) {
+      return this.verified.knownStateWithStreaming();
+    }
+
+    return this.knownState();
   }
 
   /**
    * Returns the known state of the CoValue
    *
-   * The return value identity is going to be stable as long as the CoValue is not modified.
-   *
-   * On change the knownState is invalidated and a new object is returned.
+   * For garbageCollected/onlyKnownState CoValues, returns the cached knownState.
    */
   knownState(): CoValueKnownState {
-    return this.verified?.immutableKnownState() ?? emptyKnownState(this.id);
+    // 1. If we have verified content in memory, use that (authoritative)
+    if (this.verified) {
+      return this.verified.knownState();
+    }
+
+    // 2. If we have last known state (GC'd or onlyKnownState), use that
+    if (this.#lastKnownState) {
+      return this.#lastKnownState;
+    }
+
+    // 3. Fallback to empty state (truly unknown CoValue)
+    return emptyKnownState(this.id);
+  }
+
+  /**
+   * Returns a known state message to signal to the peer that the coValue doesn't need to be synced anymore
+   *
+   * Implemented to be backward compatible with clients that don't support deleted coValues
+   */
+  stopSyncingKnownStateMessage(
+    peerKnownState: CoValueKnownState | undefined,
+  ): KnownStateMessage {
+    if (!peerKnownState) {
+      return {
+        action: "known",
+        ...this.knownState(),
+      };
+    }
+
+    const knownState = cloneKnownState(this.knownState());
+
+    // We combine everything for backward compatibility with clients that don't support deleted coValues
+    // This way they won't try to sync their own content that we have discarded because the coValue is deleted
+    combineKnownStateSessions(knownState.sessions, peerKnownState.sessions);
+
+    return {
+      action: "known",
+      ...knownState,
+    };
   }
 
   get meta(): JsonValue {
@@ -581,7 +720,7 @@ export class CoValueCore {
 
     return {
       sessionID,
-      txIndex: this.verified.sessions.get(sessionID)?.transactions.length || 0,
+      txIndex: this.verified.getTransactionsCount(sessionID) || 0,
     };
   }
 
@@ -593,6 +732,106 @@ export class CoValueCore {
     }
   }
 
+  #isDeleteTransaction(
+    sessionID: SessionID,
+    newTransactions: Transaction[],
+    skipVerify: boolean,
+  ) {
+    if (!this.verified) {
+      return {
+        value: false,
+      };
+    }
+
+    // Detect + validate delete transactions during ingestion
+    // Delete transactions are:
+    // - in a delete session (sessionID ends with `$`)
+    // - trusting (unencrypted)
+    // - have meta `{ deleted: true }`
+    let deleteTransaction: Transaction | undefined = undefined;
+
+    if (isDeleteSessionID(sessionID)) {
+      const txCount = this.verified.getTransactionsCount(sessionID) ?? 0;
+      if (txCount > 0 || newTransactions.length > 1) {
+        return {
+          value: true,
+          err: {
+            type: "DeleteTransactionRejected",
+            id: this.id,
+            sessionID,
+            reason: "InvalidDeleteTransaction",
+            error: new Error(
+              "Delete transaction must be the only transaction in the session",
+            ),
+          } as const,
+        };
+      }
+
+      const firstTransaction = newTransactions[0];
+      const deleteMarker =
+        firstTransaction && this.#getDeleteMarker(firstTransaction);
+
+      if (deleteMarker) {
+        deleteTransaction = firstTransaction;
+
+        if (deleteMarker.deleted !== this.id) {
+          return {
+            value: true,
+            err: {
+              type: "DeleteTransactionRejected",
+              id: this.id,
+              sessionID,
+              reason: "InvalidDeleteTransaction",
+              error: new Error(
+                `Delete transaction ID mismatch: expected ${this.id}, got ${deleteMarker.deleted}`,
+              ),
+            } as const,
+          };
+        }
+      }
+
+      if (this.isGroupOrAccount()) {
+        return {
+          value: true,
+          err: {
+            type: "DeleteTransactionRejected",
+            id: this.id,
+            sessionID,
+            reason: "CoValueNotDeletable",
+            error: new Error("Cannot delete Group or Account coValues"),
+          },
+        } as const;
+      }
+    }
+
+    if (!skipVerify && deleteTransaction) {
+      const author = accountOrAgentIDfromSessionID(sessionID);
+
+      const permission = this.#canAuthorDeleteCoValueAtTime(
+        author,
+        deleteTransaction.madeAt,
+      );
+
+      if (!permission.ok) {
+        return {
+          value: true,
+          err: {
+            type: "DeleteTransactionRejected",
+            id: this.id,
+            sessionID,
+            author,
+            reason: permission.reason,
+            error: new Error(permission.message),
+          },
+        } as const;
+      }
+    }
+
+    return {
+      value: Boolean(deleteTransaction),
+    };
+  }
+
   /**
    * Apply new transactions that were not generated by the current node to the CoValue
    */
@@ -602,7 +841,21 @@ export class CoValueCore {
     newSignature: Signature,
     skipVerify: boolean = false,
   ) {
+    if (newTransactions.length === 0) {
+      return;
+    }
+
     let signerID: SignerID | undefined;
+
+    // sync should never try to add transactions to a deleted coValue
+    // this can only happen if `tryAddTransactions` is called directly, without going through `handleNewContent`
+    if (this.isDeleted && !isDeleteSessionID(sessionID)) {
+      return {
+        type: "CoValueDeleted",
+        id: this.id,
+        error: new Error("Cannot add transactions to a deleted coValue"),
+      } as const;
+    }
 
     if (!skipVerify) {
       const result = this.node.resolveAccountAgent(
@@ -629,6 +882,16 @@ export class CoValueCore {
       };
     }
 
+    const isDeleteTransaction = this.#isDeleteTransaction(
+      sessionID,
+      newTransactions,
+      skipVerify,
+    );
+
+    if (isDeleteTransaction.err) {
+      return isDeleteTransaction.err;
+    }
+
     try {
       this.verified.tryAddTransactions(
         sessionID,
@@ -638,12 +901,91 @@ export class CoValueCore {
         skipVerify,
       );
 
+      // Mark deleted state when a delete marker transaction is accepted.
+      // - In skipVerify mode (storage shards), we accept + mark without permission checks.
+      // - In verify mode, we only reach here if the delete permission check passed.
+      if (isDeleteTransaction.value) {
+        this.#markAsDeleted();
+      }
+
       this.processNewTransactions();
       this.scheduleNotifyUpdate();
       this.invalidateDependants();
     } catch (e) {
       return { type: "InvalidSignature", id: this.id, error: e } as const;
     }
+  }
+
+  #markAsDeleted() {
+    this.isDeleted = true;
+    this.verified?.markAsDeleted();
+  }
+
+  #getDeleteMarker(tx: Transaction): { deleted: RawCoID } | undefined {
+    if (tx.privacy !== "trusting") {
+      return;
+    }
+    if (!tx.meta) {
+      return;
+    }
+    const meta = safeParseJSON(tx.meta);
+
+    return meta && typeof meta.deleted === "string"
+      ? (meta as { deleted: RawCoID })
+      : undefined;
+  }
+
+  #canAuthorDeleteCoValueAtTime(
+    author: RawAccountID | AgentID,
+    madeAt: number,
+  ):
+    | { ok: true }
+    | {
+        ok: false;
+        reason: DeleteTransactionRejectedError["reason"];
+        message: string;
+      } {
+    if (!this.verified) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message: "Cannot verify delete permissions without verified state",
+      };
+    }
+
+    if (this.isGroupOrAccount()) {
+      return {
+        ok: false,
+        reason: "CoValueNotDeletable",
+        message: "Cannot delete Group or Account coValues",
+      };
+    }
+
+    const group = this.safeGetGroup();
+
+    // Today, delete permission is defined in terms of group-admin on the owning group.
+    // If we cannot derive that (non-owned coValues), we reject the delete when verification is required.
+    if (!group) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message:
+          "Cannot verify delete permissions for coValues not owned by a group",
+      };
+    }
+
+    const groupAtTime = group.atTime(madeAt);
+    const role = groupAtTime.roleOfInternal(author);
+
+    if (role !== "admin") {
+      return {
+        ok: false,
+        reason: "NotAdmin",
+        message: "Delete transaction rejected: author is not an admin",
+      };
+    }
+
+    return { ok: true };
   }
 
   notifyDependants() {
@@ -698,6 +1040,20 @@ export class CoValueCore {
     }
   }
 
+  #isContentRebuildScheduled = false;
+  scheduleContentRebuild() {
+    if (!this._cachedContent || this.#isContentRebuildScheduled) {
+      return;
+    }
+
+    this.#isContentRebuildScheduled = true;
+
+    queueMicrotask(() => {
+      this.#isContentRebuildScheduled = false;
+      this._cachedContent?.rebuildFromCore();
+    });
+  }
+
   #isNotifyUpdatePaused = false;
   pauseNotifyUpdate() {
     this.#isNotifyUpdatePaused = true;
@@ -743,6 +1099,70 @@ export class CoValueCore {
     };
   }
 
+  validateDeletePermissions() {
+    if (!this.verified) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message: "Cannot verify delete permissions without verified state",
+      };
+    }
+
+    if (this.isGroupOrAccount()) {
+      return {
+        ok: false,
+        reason: "CoValueNotDeletable",
+        message: "Cannot delete Group or Account coValues",
+      };
+    }
+
+    const group = this.safeGetGroup();
+    if (!group) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message:
+          "Cannot verify delete permissions for coValues not owned by a group",
+      };
+    }
+
+    const role = group.myRole();
+    if (role !== "admin") {
+      return {
+        ok: false,
+        reason: "NotAdmin",
+        message:
+          "The current account lacks admin permissions to delete this coValue",
+      };
+    }
+
+    return { ok: true };
+  }
+
+  /**
+   * Creates a delete marker transaction for this CoValue and sets the coValue as deleted
+   *
+   * Constraints:
+   * - Account and Group CoValues cannot be deleted.
+   * - Only admins can delete a coValue.
+   */
+  deleteCoValue() {
+    if (this.isDeleted) {
+      return;
+    }
+
+    const result = this.validateDeletePermissions();
+    if (!result.ok) {
+      throw new Error(result.message);
+    }
+
+    this.makeTransaction(
+      [], // Empty changes array
+      "trusting", // Unencrypted
+      { deleted: this.id }, // Delete metadata
+    );
+  }
+
   /**
    * Creates a new transaction with local changes and syncs it to all peers
    */
@@ -757,17 +1177,29 @@ export class CoValueCore {
         "CoValueCore: makeTransaction called on coValue without verified state",
       );
     }
+    const isDeleteTransaction = Boolean(meta?.deleted);
 
-    validateTxSizeLimitInBytes(changes);
+    if (this.isDeleted && !isDeleteTransaction) {
+      logger.error("Cannot make transaction on a deleted coValue", {
+        id: this.id,
+      });
+      return false;
+    }
 
     // This is an ugly hack to get a unique but stable session ID for editing the current account
-    const sessionID =
+    let sessionID =
       this.verified.header.meta?.type === "account"
         ? (this.node.currentSessionID.replace(
             this.node.getCurrentAgent().id,
             this.node.getCurrentAgent().currentAgentID(),
           ) as SessionID)
         : this.node.currentSessionID;
+
+    if (isDeleteTransaction) {
+      sessionID = this.crypto.newDeleteSessionID(
+        this.node.getCurrentAccountOrAgentID(),
+      );
+    }
 
     const signerAgent = this.node.getCurrentAgent();
 
@@ -799,6 +1231,10 @@ export class CoValueCore {
         meta,
         madeAt ?? Date.now(),
       );
+    }
+
+    if (isDeleteTransaction) {
+      this.#markAsDeleted();
     }
 
     const { transaction } = result;
@@ -886,7 +1322,7 @@ export class CoValueCore {
     // Store the validity of the transactions before resetting the parsed transactions
     const validityBeforeReset = new Array<boolean>(verifiedTransactions.length);
     this.verifiedTransactions.forEach((transaction, index) => {
-      transaction.isValidated = false;
+      transaction.markAsToValidate();
       validityBeforeReset[index] = transaction.isValidTransactionWithChanges();
     });
 
@@ -894,6 +1330,7 @@ export class CoValueCore {
     this.toProcessTransactions = [];
     this.toDecryptTransactions = [];
     this.toParseMetaTransactions = [];
+    this.#fwwWinners.clear();
 
     this.parseNewTransactions(false);
 
@@ -945,7 +1382,7 @@ export class CoValueCore {
 
     const isBranched = this.isBranched();
 
-    for (const [sessionID, sessionLog] of this.verified.sessions.entries()) {
+    for (const [sessionID, sessionLog] of this.verified.sessionEntries()) {
       const count = this.verifiedTransactionsKnownSessions[sessionID] ?? 0;
 
       for (
@@ -994,8 +1431,13 @@ export class CoValueCore {
   }
 
   dispatchTransaction = (transaction: VerifiedTransaction) => {
-    if (!transaction.isValidated) {
+    if (transaction.stage === "to-validate") {
       this.toValidateTransactions.push(transaction);
+      return;
+    }
+
+    if (transaction.stage === "processed") {
+      this.scheduleContentRebuild();
       return;
     }
 
@@ -1017,6 +1459,8 @@ export class CoValueCore {
     determineValidTransactions(this);
     this.toValidateTransactions = [];
   }
+
+  #fwwWinners: Map<string, VerifiedTransaction> = new Map();
 
   /**
    * Parses the meta information of a transaction, and set the branchStart and mergeCommits.
@@ -1054,6 +1498,30 @@ export class CoValueCore {
     if ("merged" in transaction.meta) {
       const mergeCommit = transaction.meta as MergeCommit;
       this.mergeCommits.push(mergeCommit);
+    }
+
+    if ("fww" in transaction.meta) {
+      const fwwKey = transaction.meta.fww as string;
+      const currentWinner = this.#fwwWinners.get(fwwKey);
+
+      // First-writer-wins: keep the transaction with the smallest madeAt
+      // compareTransactions returns < 0 if transaction is earlier than currentWinner
+      if (
+        !currentWinner ||
+        this.compareTransactions(transaction, currentWinner) < 0
+      ) {
+        if (currentWinner) {
+          currentWinner.markInvalid(
+            `Transaction is not the first writer for fww key "${fwwKey}"`,
+          );
+        }
+
+        this.#fwwWinners.set(fwwKey, transaction);
+      } else {
+        transaction.markInvalid(
+          `Transaction is not the first writer for fww key "${fwwKey}"`,
+        );
+      }
     }
 
     // Check if the transaction has been merged from a branch
@@ -1137,7 +1605,7 @@ export class CoValueCore {
     from?: CoValueKnownState["sessions"];
     to?: CoValueKnownState["sessions"];
     knownTransactions?: Record<RawCoID, number>;
-
+    includeInvalidMetaTransactions?: boolean;
     // If true, the branch source transactions will be skipped. Used to gather the transactions for the merge operation.
     skipBranchSource?: boolean;
   }): DecryptedTransaction[] {
@@ -1156,6 +1624,11 @@ export class CoValueCore {
 
     const knownTransactions = options?.knownTransactions?.[this.id] ?? 0;
 
+    // Include invalid transactions in the result (only transactions invalidated by metadata parsing are included e.g. init transactions)
+    // permission errors are still not included
+    const includeInvalidMetaTransactions =
+      options?.includeInvalidMetaTransactions ?? false;
+
     for (
       let i = knownTransactions;
       i < this.toProcessTransactions.length;
@@ -1163,7 +1636,7 @@ export class CoValueCore {
     ) {
       const transaction = this.toProcessTransactions[i]!;
 
-      if (!transaction.isValidTransactionWithChanges()) {
+      if (!transaction.isProcessable(includeInvalidMetaTransactions)) {
         continue;
       }
 
@@ -1180,6 +1653,7 @@ export class CoValueCore {
         continue;
       }
 
+      transaction.markAsProcessed();
       matchingTransactions.push(transaction);
     }
 
@@ -1190,6 +1664,7 @@ export class CoValueCore {
     // If this is a branch, we load the valid transactions from the source
     if (source && this.branchStart && !options?.skipBranchSource) {
       const sourceTransactions = source.getValidTransactions({
+        includeInvalidMetaTransactions,
         knownTransactions: options?.knownTransactions,
         to: this.branchStart,
         ignorePrivateTransactions: options?.ignorePrivateTransactions ?? false,
@@ -1266,6 +1741,14 @@ export class CoValueCore {
     this.dependant.add(dependant);
   }
 
+  isGroupOrAccount() {
+    if (!this.verified) {
+      return false;
+    }
+
+    return this.verified.header.ruleset.type === "group";
+  }
+
   isGroup() {
     if (!this.verified) {
       return false;
@@ -1340,6 +1823,9 @@ export class CoValueCore {
 
     // The transactions that have already been processed, used for the incremental builds of the content views
     knownTransactions?: Record<RawCoID, number>;
+
+    // Whether to include invalid transactions in the result (only transactions invalidated by metadata parsing are included e.g. init transactions)
+    includeInvalidMetaTransactions?: boolean;
   }): DecryptedTransaction[] {
     const allTransactions = this.getValidTransactions(options);
 
@@ -1373,7 +1859,7 @@ export class CoValueCore {
       );
     }
 
-    if (this.verified.header.ruleset.type === "group") {
+    if (this.isGroupOrAccount()) {
       return expectGroup(this.getCurrentContent()).getCurrentReadKey();
     } else if (this.verified.header.ruleset.type === "ownedByGroup") {
       return this.node
@@ -1401,16 +1887,26 @@ export class CoValueCore {
       );
     }
 
-    // Getting the readKey from accounts
-    if (this.verified.header.ruleset.type === "group") {
+    if (this.isGroup()) {
+      // is group
       const content = expectGroup(
-        // load the account without private transactions, because we are here
-        // to be able to decrypt those
+        // Private transactions are not considered valid in groups, so we don't need to pass
+        // ignorePrivateTransactions: true to safely load the content
+        this.getCurrentContent(),
+      );
+
+      return content.getReadKey(keyID);
+    } else if (this.isGroupOrAccount()) {
+      // is account
+      const content = expectGroup(
+        // Old accounts might have private transactions, because we were encrypting the root id in the past
+        // So we need to load the account without private transactions, because we can't decrypt them without the read key
         this.getCurrentContent({ ignorePrivateTransactions: true }),
       );
 
       return content.getReadKey(keyID);
     } else if (this.verified.header.ruleset.type === "ownedByGroup") {
+      // is a CoValue owned by a group
       return expectGroup(
         this.node
           .expectCoValueLoaded(this.verified.header.ruleset.group)
@@ -1452,7 +1948,7 @@ export class CoValueCore {
   }
 
   getTx(txID: TransactionID): Transaction | undefined {
-    return this.verified?.sessions.get(txID.sessionID)?.transactions[
+    return this.verified?.getSession(txID.sessionID)?.transactions[
       txID.txIndex
     ];
   }
@@ -1465,11 +1961,11 @@ export class CoValueCore {
     return this.node.syncManager.waitForSync(this.id, options?.timeout);
   }
 
-  load(peers: PeerState[]) {
+  load(peers: PeerState[], mode?: LoadMode) {
     this.loadFromStorage((found) => {
       // When found the load is triggered by handleNewContent
       if (!found) {
-        this.loadFromPeers(peers);
+        this.loadFromPeers(peers, mode);
       }
     });
   }
@@ -1508,7 +2004,16 @@ export class CoValueCore {
       return;
     }
 
-    if (currentState !== "unknown") {
+    // Check if we need to load from storage:
+    // - If storage state is not unknown (already tried), AND
+    // - Overall state is not garbageCollected/onlyKnownState (which need full content)
+    // Then return early
+    const overallState = this.loadingState;
+    if (
+      currentState !== "unknown" &&
+      overallState !== "garbageCollected" &&
+      overallState !== "onlyKnownState"
+    ) {
       done?.(currentState === "available");
       return;
     }
@@ -1533,7 +2038,8 @@ export class CoValueCore {
    * Lazily load only the knownState from storage without loading full transaction data.
    * This is useful for checking if a peer needs new content before committing to a full load.
    *
-   * Caching and deduplication are handled at the storage layer.
+   * If found in storage, marks the CoValue as onlyKnownState and caches the knownState.
+   * This enables accurate LOAD requests during peer reconciliation.
    *
    * @param done - Callback with the storage knownState, or undefined if not found in storage
    */
@@ -1545,17 +2051,29 @@ export class CoValueCore {
       return;
     }
 
-    // If already available in memory, return the current knownState
-    if (this.isAvailable()) {
-      done(this.knownState());
+    // If we already have knowledge about this CoValue (in memory or cached), return it
+    // knownState() returns verified state, lastKnownState, or empty state
+    const knownState = this.knownState();
+    if (knownState.header) {
+      done(knownState);
       return;
     }
 
     // Delegate to storage - caching is handled at storage level
-    this.node.storage.loadKnownState(this.id, done);
+    this.node.storage.loadKnownState(this.id, (knownState) => {
+      // The coValue could become available in the meantime.
+      if (knownState && !this.isAvailable()) {
+        // Cache the knownState and mark as onlyKnownState
+        const previousState = this.loadingState;
+        this.#lastKnownStateSource = "onlyKnownState";
+        this.#lastKnownState = knownState;
+        this.updateCounter(previousState);
+      }
+      done(knownState);
+    });
   }
 
-  loadFromPeers(peers: PeerState[]) {
+  loadFromPeers(peers: PeerState[], mode?: LoadMode) {
     if (peers.length === 0) {
       return;
     }
@@ -1565,29 +2083,18 @@ export class CoValueCore {
 
       if (currentState === "unknown" || currentState === "unavailable") {
         this.markPending(peer.id);
-        this.internalLoadFromPeer(peer);
+        this.internalLoadFromPeer(peer, mode);
       }
     }
   }
 
-  private internalLoadFromPeer(peer: PeerState) {
+  private internalLoadFromPeer(peer: PeerState, mode?: LoadMode) {
     if (peer.closed && !peer.persistent) {
       this.markNotFoundInPeer(peer.id);
       return;
     }
 
-    /**
-     * On reconnection persistent peers will automatically fire the load request
-     * as part of the reconnection process.
-     */
-    if (!peer.closed) {
-      peer.pushOutgoingMessage({
-        action: "load",
-        ...this.knownState(),
-      });
-      peer.trackLoadRequestSent(this.id);
-    }
-
+    let persistentCloseTimer: ReturnType<typeof setTimeout> | undefined;
     const markNotFound = () => {
       if (this.getLoadingStateForPeer(peer.id) === "pending") {
         logger.warn("Timeout waiting for peer to load coValue", {
@@ -1598,10 +2105,44 @@ export class CoValueCore {
       }
     };
 
-    const timeout = setTimeout(markNotFound, CO_VALUE_LOADING_CONFIG.TIMEOUT);
-    const removeCloseListener = peer.persistent
-      ? undefined
-      : peer.addCloseListener(markNotFound);
+    const clearPersistentCloseTimer = () => {
+      if (persistentCloseTimer) {
+        clearTimeout(persistentCloseTimer);
+        persistentCloseTimer = undefined;
+      }
+    };
+
+    const schedulePersistentPeerGraceTimeout = () => {
+      clearPersistentCloseTimer();
+      persistentCloseTimer = setTimeout(() => {
+        // If the peer with the same id reconnected, avoid marking it as unavailable.
+        const currentPeer = this.node.syncManager.peers[peer.id];
+        if (currentPeer && !currentPeer.closed) {
+          return;
+        }
+        markNotFound();
+      }, CO_VALUE_LOADING_CONFIG.TIMEOUT);
+    };
+
+    // Non-persistent peers are considered unavailable immediately on close.
+    // Persistent peers get a grace period to reconnect before being marked unavailable.
+    const removeCloseListener = peer.addCloseListener(() => {
+      if (!peer.persistent) {
+        markNotFound();
+        return;
+      }
+      schedulePersistentPeerGraceTimeout();
+    });
+
+    /**
+     * On reconnection persistent peers will automatically fire the load request
+     * as part of the reconnection process.
+     */
+    if (!peer.closed) {
+      peer.sendLoadRequest(this, mode);
+    } else if (peer.persistent) {
+      schedulePersistentPeerGraceTimeout();
+    }
 
     this.subscribe((state, unsubscribe) => {
       const peerState = state.getLoadingStateForPeer(peer.id);
@@ -1612,8 +2153,8 @@ export class CoValueCore {
         peerState === "unavailable"
       ) {
         unsubscribe();
-        removeCloseListener?.();
-        clearTimeout(timeout);
+        removeCloseListener();
+        clearPersistentCloseTimer();
       }
     }, true);
   }
@@ -1645,9 +2186,19 @@ export type TriedToAddTransactionsWithoutSignerIDError = {
   sessionID: SessionID;
 };
 
+export type DeleteTransactionRejectedError = {
+  type: "DeleteTransactionRejected";
+  id: RawCoID;
+  sessionID: SessionID;
+  author: RawAccountID | AgentID;
+  reason: "NotAdmin" | "CoValueNotDeletable" | "CannotVerifyPermissions";
+  error: Error;
+};
+
 export type TryAddTransactionsError =
   | TriedToAddTransactionsWithoutVerifiedStateErrpr
   | TriedToAddTransactionsWithoutSignerIDError
   | ResolveAccountAgentError
   | InvalidHashError
-  | InvalidSignatureError;
+  | InvalidSignatureError
+  | DeleteTransactionRejectedError;

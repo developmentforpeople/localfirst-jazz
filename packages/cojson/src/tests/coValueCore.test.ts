@@ -9,13 +9,14 @@ import {
 } from "vitest";
 import { CoValueCore, idforHeader } from "../coValueCore/coValueCore.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { stableStringify } from "../jsonStringify.js";
+import { Stringified } from "../jsonStringify.js";
 import { LocalNode } from "../localNode.js";
 import {
   agentAndSessionIDFromSecret,
   createTestMetricReader,
   createTestNode,
   createTwoConnectedNodes,
+  createUnloadedCoValue,
   loadCoValueOrFail,
   nodeWithRandomAgentAndSessionID,
   randomAgentAndSessionID,
@@ -25,7 +26,7 @@ import {
   waitFor,
 } from "./testUtils.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
-import { setMaxTxSizeBytes } from "../config.js";
+import { JsonValue } from "../jsonValue.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -89,14 +90,6 @@ test("transactions with wrong signature are rejected", () => {
 });
 
 describe("transactions that exceed the byte size limit are rejected", () => {
-  beforeEach(() => {
-    setMaxTxSizeBytes(1 * 1024);
-  });
-
-  afterEach(() => {
-    setMaxTxSizeBytes(1 * 1024 * 1024);
-  });
-
   test("makeTransaction should throw error when transaction exceeds byte size limit", () => {
     const [agent, sessionID] = randomAgentAndSessionID();
     const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
@@ -108,7 +101,7 @@ describe("transactions that exceed the byte size limit are rejected", () => {
       ...Crypto.createdNowUnique(),
     });
 
-    const largeBinaryData = "x".repeat(1024 + 100);
+    const largeBinaryData = "x".repeat(1024 * 1024 + 100);
 
     expect(() => {
       coValue.makeTransaction(
@@ -119,7 +112,9 @@ describe("transactions that exceed the byte size limit are rejected", () => {
         ],
         "trusting",
       );
-    }).toThrow(/Transaction is too large to be synced/);
+    }).toThrow(
+      /Transaction too large to be synced: 1048689 bytes > 1048576 bytes limit/,
+    );
   });
 
   test("makeTransaction should work for transactions under byte size limit", () => {
@@ -357,7 +352,9 @@ test("changing parent and child group trigger only one invalidation on the local
 test("correctly records transactions", async () => {
   const node = nodeWithRandomAgentAndSessionID();
 
-  const changes1 = stableStringify([{ hello: "world" }]);
+  const changes1 = JSON.stringify([{ hello: "world" }]) as Stringified<
+    JsonValue[]
+  >;
   node.syncManager.recordTransactionsSize(
     [
       {
@@ -376,7 +373,7 @@ test("correctly records transactions", async () => {
   expect(value.count).toBe(1);
   expect(value.sum).toBe(changes1.length);
 
-  const changes2 = stableStringify([{ foo: "bar" }]);
+  const changes2 = JSON.stringify([{ foo: "bar" }]) as Stringified<JsonValue[]>;
   node.syncManager.recordTransactionsSize(
     [
       {
@@ -406,7 +403,8 @@ test("(smoke test) records transactions from local node", async () => {
   });
 
   assert(typeof value !== "number" && !!value?.count);
-  expect(value.count).toBe(3);
+  // Creating a group now creates 4 transactions: admin member, key revelation, readKey, and groupSealer
+  expect(value.count).toBe(4);
 });
 
 test("creating a coValue with a group should't trigger automatically a content creation (performance)", () => {
@@ -869,40 +867,66 @@ describe("markErrored and isErroredInPeer", () => {
   });
 });
 
-test("knownState should return the same object until the CoValue is modified", () => {
+test("knownState should reflect modifications", () => {
   const [agent, sessionID] = randomAgentAndSessionID();
   const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
 
   const group = node.createGroup();
   const map = group.createMap();
 
-  // Get the knownState for the first time
+  // Get the knownState before any modification
   const knownState1 = map.core.knownState();
-
-  // Get the knownState again - should be the same object
-  const knownState2 = map.core.knownState();
-  expect(knownState2).toBe(knownState1);
-
-  // Call it multiple times to ensure it's always the same object
-  const knownState3 = map.core.knownState();
-  expect(knownState3).toBe(knownState1);
 
   // Now modify the CoValue by making a transaction
   map.set("hello", "world");
 
-  // Get the knownState after modification - should be a different object
-  const knownState4 = map.core.knownState();
-  expect(knownState4).not.toBe(knownState1);
-
-  // Verify that subsequent calls still return the same (new) object
-  const knownState5 = map.core.knownState();
-  expect(knownState5).toBe(knownState4);
+  // Get the knownState after modification - should have updated sessions
+  const knownState2 = map.core.knownState();
+  expect(knownState2).not.toEqual(knownState1);
 
   // Make another modification
   map.set("foo", "bar");
 
-  // Get the knownState after second modification - should be yet another different object
-  const knownState6 = map.core.knownState();
-  expect(knownState6).not.toBe(knownState4);
-  expect(knownState6).not.toBe(knownState1);
+  // Get the knownState after second modification - should have updated sessions again
+  const knownState3 = map.core.knownState();
+  expect(knownState3).not.toEqual(knownState2);
+  expect(knownState3).not.toEqual(knownState1);
+});
+
+describe("provideHeader uniqueness validation", () => {
+  test("should reject number uniqueness", () => {
+    const node = createTestNode();
+    const { coValue, header } = createUnloadedCoValue(node);
+
+    const invalidHeader = {
+      ...header,
+      uniqueness: 1.5 as any, // non-integer
+    };
+
+    expect(coValue.provideHeader(invalidHeader)).toBe(false);
+  });
+
+  test("should reject array uniqueness", () => {
+    const node = createTestNode();
+    const { coValue, header } = createUnloadedCoValue(node);
+
+    const invalidHeader = {
+      ...header,
+      uniqueness: [1, 2, 3] as any,
+    };
+
+    expect(coValue.provideHeader(invalidHeader)).toBe(false);
+  });
+
+  test("should reject object uniqueness with non-string values", () => {
+    const node = createTestNode();
+    const { coValue, header } = createUnloadedCoValue(node);
+
+    const invalidHeader = {
+      ...header,
+      uniqueness: { key: 123 } as any,
+    };
+
+    expect(coValue.provideHeader(invalidHeader)).toBe(false);
+  });
 });

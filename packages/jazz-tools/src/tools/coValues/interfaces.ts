@@ -2,6 +2,7 @@ import {
   cojsonInternals,
   type CoValueUniqueness,
   type CojsonInternalTypes,
+  type RawCoID,
   type RawCoValue,
 } from "cojson";
 import { AvailableCoValueCore } from "cojson";
@@ -29,13 +30,23 @@ import {
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
   inspect,
+  LocalValidationMode,
 } from "../internal.js";
-import type { BranchDefinition } from "../subscribe/types.js";
+import type {
+  BranchDefinition,
+  CoValueErrorState,
+} from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
+import { JazzError } from "../subscribe/JazzError.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export interface CoValueClass<Value extends CoValue = CoValue> {
+export interface CoValueClass<
+  Value extends CoValue = CoValue,
+  Schema extends CoreCoValueSchema = CoreCoValueSchema,
+> {
+  coValueSchema?: Schema;
   /** @ignore */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   new (...args: any[]): Value;
@@ -125,6 +136,16 @@ export function getUnloadedCoValueWithoutId<T extends CoValue>(
   return newValue;
 }
 
+export function createSettledCoValue<T extends CoValue>(
+  id: ID<T>,
+  loadingState: CoValueErrorState,
+): Settled<T> {
+  return {
+    $jazz: { id, loadingState },
+    $isLoaded: false,
+  };
+}
+
 export function createUnloadedCoValue<T extends CoValue>(
   id: ID<T>,
   loadingState: NotLoadedCoValueState,
@@ -177,8 +198,7 @@ export function loadCoValue<
         loadAs: options.loadAs,
         syncResolution: true,
         skipRetry: options.skipRetry,
-        onUnavailable: resolve,
-        onUnauthorized: resolve,
+        onError: resolve,
         unstable_branch: options.unstable_branch,
       },
       (value, unsubscribe) => {
@@ -223,13 +243,22 @@ type SubscribeListener<V extends CoValue, R extends RefsToResolve<V>> = (
   unsubscribe: () => void,
 ) => void;
 
+export type SubscribeCallback<V> = (value: V, unsubscribe: () => void) => void;
+
 export type SubscribeListenerOptions<
   V extends CoValue,
   R extends RefsToResolve<V>,
 > = {
   resolve?: RefsToResolveStrict<V, R>;
   loadAs?: Account | AnonymousJazzAgent;
+  onError?: (value: NotLoaded<V>) => void;
+  /**
+   * @deprecated Use `onError` instead. This callback will be removed in a future version.
+   */
   onUnauthorized?: (value: NotLoaded<V>) => void;
+  /**
+   * @deprecated Use `onError` instead. This callback will be removed in a future version.
+   */
   onUnavailable?: (value: NotLoaded<V>) => void;
   unstable_branch?: BranchDefinition;
 };
@@ -257,6 +286,7 @@ export function parseSubscribeRestArgs<
         options: {
           resolve: args[0].resolve,
           loadAs: args[0].loadAs,
+          onError: args[0].onError,
           onUnauthorized: args[0].onUnauthorized,
           onUnavailable: args[0].onUnavailable,
           unstable_branch: args[0].unstable_branch,
@@ -304,7 +334,14 @@ export function subscribeToCoValue<
   options: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
+    onError?: (value: Inaccessible<V>) => void;
+    /**
+     * @deprecated Use `onError` instead. This callback will be removed in a future version.
+     */
     onUnavailable?: (value: Inaccessible<V>) => void;
+    /**
+     * @deprecated Use `onError` instead. This callback will be removed in a future version.
+     */
     onUnauthorized?: (value: Inaccessible<V>) => void;
     syncResolution?: boolean;
     skipRetry?: boolean;
@@ -332,6 +369,9 @@ export function subscribeToCoValue<
     options.unstable_branch,
   );
 
+  // Track performance for API subscriptions
+  rootNode.trackLoadingPerformance("subscribe");
+
   const handleUpdate = () => {
     if (unsubscribed) return;
 
@@ -342,6 +382,9 @@ export function subscribeToCoValue<
       return;
     }
 
+    options.onError?.(value as Inaccessible<V>);
+
+    // Backward compatibility, going to remove this in the next minor release
     switch (value.$jazz.loadingState) {
       case CoValueLoadingState.UNAVAILABLE:
         options.onUnavailable?.(value as Inaccessible<V>);
@@ -381,7 +424,14 @@ export function subscribeToExistingCoValue<
   options:
     | {
         resolve?: RefsToResolveStrict<V, R>;
+        onError?: (value: NotLoaded<V>) => void;
+        /**
+         * @deprecated Use `onError` instead. This callback will be removed in a future version.
+         */
         onUnavailable?: (value: NotLoaded<V>) => void;
+        /**
+         * @deprecated Use `onError` instead. This callback will be removed in a future version.
+         */
         onUnauthorized?: (value: NotLoaded<V>) => void;
         unstable_branch?: BranchDefinition;
       }
@@ -394,6 +444,7 @@ export function subscribeToExistingCoValue<
     {
       loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
+      onError: options?.onError,
       onUnavailable: options?.onUnavailable,
       onUnauthorized: options?.onUnauthorized,
       unstable_branch: options?.unstable_branch,
@@ -420,19 +471,43 @@ export function isAnonymousAgentInstance(
   return TypeSym in instance && instance[TypeSym] === "Anonymous";
 }
 
+export type CoValueCreateOptions<
+  MoreOptions extends object = {},
+  Owner extends Group | Account = Group,
+> =
+  | undefined
+  | Owner
+  | ((
+      | {
+          owner: Owner;
+          // we want to have explicit owner if unique is provided
+          unique: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
+        }
+      | {
+          owner?: Owner;
+          unique?: undefined;
+          validation?: LocalValidationMode;
+        }
+    ) &
+      MoreOptions);
+
+export type CoValueCreateOptionsInternal = CoValueCreateOptions<
+  {
+    onCreate?: OnCreateCallback;
+    firstComesWins?: boolean;
+    restrictDeletion?: boolean;
+  },
+  Account | Group
+>;
+
 export function parseCoValueCreateOptions(
-  options:
-    | {
-        owner?: Account | Group;
-        unique?: CoValueUniqueness["uniqueness"];
-        onCreate?: OnCreateCallback;
-      }
-    | Account
-    | Group
-    | undefined,
+  options: CoValueCreateOptionsInternal,
 ): {
   owner: Group;
   uniqueness?: CoValueUniqueness;
+  firstComesWins: boolean;
+  restrictDeletion?: boolean;
 } {
   const onCreate =
     options && "onCreate" in options ? options.onCreate : undefined;
@@ -440,19 +515,36 @@ export function parseCoValueCreateOptions(
   if (!options) {
     const owner = Group.create();
     onCreate?.(owner);
-    return { owner, uniqueness: undefined };
+    return {
+      owner,
+      uniqueness: undefined,
+      firstComesWins: false,
+      restrictDeletion: undefined,
+    };
   }
 
   if (TypeSym in options) {
     if (options[TypeSym] === "Account") {
       const owner = accountOrGroupToGroup(options);
       onCreate?.(owner);
-      return { owner, uniqueness: undefined };
+      return {
+        owner,
+        uniqueness: undefined,
+        firstComesWins: false,
+        restrictDeletion: undefined,
+      };
     } else if (options[TypeSym] === "Group") {
       onCreate?.(options);
-      return { owner: options, uniqueness: undefined };
+      return {
+        owner: options,
+        uniqueness: undefined,
+        firstComesWins: false,
+        restrictDeletion: undefined,
+      };
     }
   }
+
+  const firstComesWins = options.firstComesWins ?? false;
 
   const uniqueness = options.unique
     ? { uniqueness: options.unique }
@@ -467,6 +559,8 @@ export function parseCoValueCreateOptions(
   const opts = {
     owner,
     uniqueness,
+    firstComesWins,
+    restrictDeletion: options.restrictDeletion,
   };
   return opts;
 }
@@ -482,17 +576,21 @@ export function parseGroupCreateOptions(
   options:
     | {
         owner?: Account;
+        name?: string;
       }
     | Account
     | undefined,
-) {
+): { owner: Account; name?: string } {
   if (!options) {
     return { owner: activeAccountContext.get() };
   }
 
-  return TypeSym in options && isAccountInstance(options)
-    ? { owner: options }
-    : { owner: options.owner ?? activeAccountContext.get() };
+  if (TypeSym in options && isAccountInstance(options)) {
+    return { owner: options };
+  }
+
+  const owner = options.owner ?? activeAccountContext.get();
+  return options.name !== undefined ? { owner, name: options.name } : { owner };
 }
 
 export function getIdFromHeader(
@@ -506,6 +604,19 @@ export function getIdFromHeader(
 
   return cojsonInternals.idforHeader(header, node.crypto);
 }
+
+/**
+ * Mapping from CoValue TypeSym to the CoValueHeaderType.
+ */
+const coValueTypeSymToHeaderType: Record<string, CoValueHeaderType | null> = {
+  CoMap: "comap",
+  Group: null,
+  Account: null,
+  CoList: "colist",
+  CoStream: "costream",
+  CoPlainText: "coplaintext",
+  BinaryCoStream: null,
+};
 
 export async function unstable_loadUnique<
   S extends CoValueClassOrSchema,
@@ -521,24 +632,63 @@ export async function unstable_loadUnique<
   },
 ): Promise<MaybeLoaded<Loaded<S, R>>> {
   const cls = coValueClassFromCoValueClassOrSchema(schema);
-
-  if (
-    !("_getUniqueHeader" in cls) ||
-    typeof cls._getUniqueHeader !== "function"
-  ) {
-    throw new Error("CoValue class does not support unique headers");
-  }
-
-  const header = cls._getUniqueHeader(options.unique, options.owner.$jazz.id);
+  const headerType = getUniqueHeaderType(schema);
 
   // @ts-expect-error the CoValue class is too generic for TS to infer its instances are CoValues
   return internalLoadUnique(cls, {
-    header,
+    type: headerType,
+    unique: options.unique,
     onCreateWhenMissing: options.onCreateWhenMissing,
     onUpdateWhenFound: options.onUpdateWhenFound,
     owner: options.owner,
     resolve: options.resolve,
   }) as unknown as MaybeLoaded<Loaded<S, R>>;
+}
+
+export type CoValueHeaderType = "comap" | "colist" | "costream" | "coplaintext";
+
+/**
+ * Get the CoValueHeaderType from a CoValue class.
+ * Throws for unsupported types (Group, Account, BinaryCoStream).
+ */
+export function getUniqueHeaderType(
+  schema: CoValueClassOrSchema,
+): CoValueHeaderType {
+  const cls = coValueClassFromCoValueClassOrSchema(schema);
+  const typeSym = cls.prototype[TypeSym] as string | undefined;
+  if (!typeSym) {
+    throw new Error(`Cannot determine CoValue type from class: ${cls.name}`);
+  }
+
+  const headerType = coValueTypeSymToHeaderType[typeSym];
+  if (!headerType) {
+    throw new Error(
+      `Unsupported CoValue type for unique headers: ${typeSym}. ` +
+        `Only CoMap, CoList, CoFeed (CoStream), and CoPlainText are supported.`,
+    );
+  }
+
+  return headerType;
+}
+
+/**
+ * Generate a unique header for a CoValue class.
+ * Throws for unsupported types (Group, Account, BinaryCoStream).
+ */
+export function getUniqueHeader(
+  type: CoValueHeaderType,
+  unique: CoValueUniqueness["uniqueness"],
+  ownerID: ID<Account> | ID<Group>,
+): CoValueHeader {
+  return {
+    type,
+    ruleset: {
+      type: "ownedByGroup" as const,
+      group: ownerID as RawCoID,
+    },
+    meta: null,
+    uniqueness: unique,
+  };
 }
 
 export async function internalLoadUnique<
@@ -547,7 +697,8 @@ export async function internalLoadUnique<
 >(
   cls: CoValueClass<V>,
   options: {
-    header: CoValueHeader;
+    unique: CoValueUniqueness["uniqueness"];
+    type: CoValueHeaderType;
     onCreateWhenMissing?: () => void;
     onUpdateWhenFound?: (value: Resolved<V, R>) => void;
     owner: Account | Group;
@@ -559,7 +710,12 @@ export async function internalLoadUnique<
   const node =
     loadAs[TypeSym] === "Anonymous" ? loadAs.node : loadAs.$jazz.localNode;
 
-  const id = cojsonInternals.idforHeader(options.header, node.crypto);
+  const header = getUniqueHeader(
+    options.type,
+    options.unique,
+    options.owner.$jazz.id,
+  );
+  const id = cojsonInternals.idforHeader(header, node.crypto);
 
   // We first try to load the unique value without using resolve and without
   // retrying failures
@@ -576,6 +732,13 @@ export async function internalLoadUnique<
   // to ward against race conditions that would happen when
   // running the same upsert unique concurrently
   if (options.onCreateWhenMissing && !isAvailable) {
+    if (!loadAs.canWrite(options.owner)) {
+      return createSettledCoValue<Resolved<V, R>>(
+        id,
+        CoValueLoadingState.UNAUTHORIZED,
+      );
+    }
+
     options.onCreateWhenMissing();
 
     return loadCoValueWithoutMe(cls, id, {
@@ -597,7 +760,7 @@ export async function internalLoadUnique<
       resolve: options.resolve,
     });
 
-    if (loaded.$isLoaded) {
+    if (loaded.$isLoaded && loadAs.canWrite(options.owner)) {
       // we don't return the update result because
       // we want to run another load to backfill any possible partially loaded
       // values that have been set in the update
@@ -688,23 +851,11 @@ export async function exportCoValue<
     options.unstable_branch,
   );
 
-  const value = await new Promise<Loaded<S, R> | null>((resolve) => {
-    rootNode.setListener(() => {
-      const value = rootNode.getCurrentValue();
-
-      if (value.$isLoaded) {
-        resolve(value as Loaded<S, R>);
-      } else if (
-        value.$jazz.loadingState === CoValueLoadingState.UNAVAILABLE ||
-        value.$jazz.loadingState === CoValueLoadingState.UNAUTHORIZED
-      ) {
-        resolve(null);
-        rootNode.destroy();
-      }
-    });
-  });
-
-  if (!value) {
+  try {
+    await rootNode.getPromise();
+    rootNode.destroy();
+  } catch (error) {
+    rootNode.destroy();
     return null;
   }
 
@@ -857,19 +1008,141 @@ export async function unstable_mergeBranchWithResolve<
     options.branch,
   );
 
-  await new Promise<void>((resolve, reject) => {
-    rootNode.setListener((value) => {
-      if (value.type === CoValueLoadingState.UNAVAILABLE) {
-        reject(new Error("Unable to load the branch. " + value.toString()));
-      } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
-        reject(new Error("Unable to load the branch. " + value.toString()));
-      } else if (value.type === CoValueLoadingState.LOADED) {
-        resolve();
-      }
-
-      rootNode.destroy();
-    });
-  });
+  try {
+    await rootNode.getPromise();
+    rootNode.destroy();
+  } catch (error) {
+    rootNode.destroy();
+    throw error;
+  }
 
   unstable_mergeBranch(rootNode);
+}
+
+/**
+ * Permanently delete a group of coValues
+ *
+ * This operation is irreversible and will permanently delete the coValues from the local machine and the sync servers.
+ *
+ */
+export async function deleteCoValues<
+  S extends CoValueClassOrSchema,
+  const R extends ResolveQuery<S>,
+>(
+  cls: S,
+  id: ID<CoValue>,
+  options: {
+    resolve?: ResolveQueryStrict<S, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+  } = {},
+) {
+  const loadAs = options.loadAs ?? activeAccountContext.get();
+  const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.localNode;
+
+  const resolve = options.resolve ?? true;
+
+  const rootNode = new SubscriptionScope<CoValue>(
+    node,
+    resolve as any,
+    id,
+    {
+      ref: coValueClassFromCoValueClassOrSchema(cls),
+      optional: false,
+    },
+    false,
+    false,
+    undefined,
+  );
+
+  try {
+    await rootNode.getPromise();
+    rootNode.destroy();
+  } catch (error) {
+    rootNode.destroy();
+    throw error;
+  }
+
+  // We validate permissions to fail early if one of the loaded coValues is not deletable
+  const errors = validateDeletePermissions(rootNode);
+
+  if (errors.length > 0) {
+    const combined = new JazzError(
+      id,
+      CoValueLoadingState.DELETED,
+      errors.flatMap((e) => e.issues),
+    );
+    throw new Error(combined.toString());
+  }
+
+  const deletedValues = deleteCoValueFromSubscription(rootNode);
+
+  await Promise.allSettled(
+    Array.from(deletedValues, (value) => value.waitForSync()),
+  );
+}
+
+function validateDeletePermissions(
+  rootNode: SubscriptionScope<CoValue>,
+  path: string[] = [],
+  errors: JazzError[] = [],
+): JazzError[] {
+  for (const [key, childNode] of rootNode.childNodes.entries()) {
+    validateDeletePermissions(childNode, [...path, key], errors);
+  }
+
+  if (rootNode.value.type !== CoValueLoadingState.LOADED) {
+    return errors;
+  }
+
+  const core = rootNode.value.value.$jazz.raw.core;
+
+  // Account and Group coValues are not deletable, we skip them to make it easier to delete all coValues owned by an account
+  if (core.isGroupOrAccount()) {
+    return errors;
+  }
+
+  const result = core.validateDeletePermissions();
+  if (!result.ok) {
+    errors.push(
+      new JazzError(core.id, CoValueLoadingState.DELETED, [
+        {
+          code: "deleteError",
+          message: `Jazz Delete Error: ${result.message}`,
+          params: {},
+          path,
+        },
+      ]),
+    );
+  }
+
+  return errors;
+}
+
+function deleteCoValueFromSubscription(
+  rootNode: SubscriptionScope<CoValue>,
+  values = new Set<AvailableCoValueCore>(),
+) {
+  for (const childNode of rootNode.childNodes.values()) {
+    deleteCoValueFromSubscription(childNode, values);
+  }
+
+  if (rootNode.value.type !== CoValueLoadingState.LOADED) {
+    return values;
+  }
+
+  const core = rootNode.value.value.$jazz.raw.core;
+
+  // Account and Group coValues are not deletable, we skip them to make it easier to delete all coValues owned by an account
+  if (core.isGroupOrAccount()) {
+    return values;
+  }
+
+  try {
+    core.deleteCoValue();
+    values.add(core);
+  } catch (error) {
+    console.error("Failed to delete coValue", error);
+  }
+
+  return values;
 }

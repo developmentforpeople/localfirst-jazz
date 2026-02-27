@@ -3,8 +3,31 @@ import type { SQLiteBindValue, SQLiteDatabase } from "expo-sqlite";
 import { type SQLiteDatabaseDriverAsync } from "jazz-tools/react-native-core";
 
 export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
+  private static adapterByDbName = new Map<string, ExpoSQLiteAdapter>();
   private db: SQLiteDatabase | null = null;
+  private initializing: Promise<SQLiteDatabase> | null = null;
   private dbName: string;
+
+  static withDB(db: SQLiteDatabase): ExpoSQLiteAdapter {
+    const adapter = new ExpoSQLiteAdapter();
+    adapter.db = db;
+    return adapter;
+  }
+
+  /**
+   * Returns a shared adapter instance for the given database name.
+   * Multiple providers in the same runtime reuse the same adapter.
+   */
+  static getInstance(dbName: string = "jazz-storage"): ExpoSQLiteAdapter {
+    const existing = ExpoSQLiteAdapter.adapterByDbName.get(dbName);
+    if (existing) {
+      return existing;
+    }
+
+    const adapter = new ExpoSQLiteAdapter(dbName);
+    ExpoSQLiteAdapter.adapterByDbName.set(dbName, adapter);
+    return adapter;
+  }
 
   public constructor(dbName: string = "jazz-storage") {
     this.dbName = dbName;
@@ -15,11 +38,21 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
       return;
     }
 
-    const db = await openDatabaseAsync(this.dbName, {
-      useNewConnection: true,
-    });
-    await db.execAsync("PRAGMA journal_mode = WAL");
-    this.db = db;
+    if (!this.initializing) {
+      this.initializing = (async () => {
+        const db = await openDatabaseAsync(this.dbName, {
+          useNewConnection: true,
+        });
+        await db.execAsync("PRAGMA journal_mode = WAL");
+        return db;
+      })();
+    }
+
+    try {
+      this.db = await this.initializing;
+    } finally {
+      this.initializing = null;
+    }
   }
 
   public async query<T>(sql: string, params?: unknown[]): Promise<T[]> {
@@ -56,13 +89,13 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
     await this.db.runAsync(sql, params?.map((p) => p as SQLiteBindValue) ?? []);
   }
 
-  public async transaction(callback: () => unknown) {
+  public async transaction(callback: (tx: ExpoSQLiteAdapter) => unknown) {
     if (!this.db) {
       throw new Error("Database not initialized");
     }
 
     await this.db.withTransactionAsync(async () => {
-      await callback();
+      await callback(ExpoSQLiteAdapter.withDB(this.db!));
     });
   }
 

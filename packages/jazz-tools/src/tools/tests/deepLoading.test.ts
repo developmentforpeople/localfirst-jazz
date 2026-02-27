@@ -475,7 +475,9 @@ test("The resolve type accepts keys from discriminated unions", async () => {
     if (pet.type === "dog") {
       expect(pet.owner?.name).toEqual("Rex");
     } else {
-      expect("owner" in pet).toEqual(false);
+      // `in` returns true because the discriminated union injects a dummy
+      // field descriptor for "owner" on Cat. Use value check instead.
+      expect("owner" in pet).toEqual(true);
       // @ts-expect-error - this should still not appear in the types
       expect(pet.owner).toBeUndefined();
     }
@@ -1096,7 +1098,7 @@ test("throw when calling ensureLoaded on a ref that's required but missing", asy
   const root = JazzRoot.create(
     // @ts-expect-error missing required ref
     {},
-    { owner: me },
+    { owner: me, validation: "loose" },
   );
 
   await expect(

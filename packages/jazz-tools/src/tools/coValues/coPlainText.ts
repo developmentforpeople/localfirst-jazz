@@ -19,13 +19,17 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CorePlainTextSchema,
+  CoValueCreateOptionsInternal,
 } from "../internal.js";
 import { Account } from "./account.js";
 import { getCoValueOwner, Group } from "./group.js";
+import { type CoreRichTextSchema } from "../implementation/zodSchema/schemaTypes/RichTextSchema.js";
 
 export type TextPos = OpID;
 
 export class CoPlainText extends String implements CoValue {
+  static coValueSchema?: CorePlainTextSchema | CoreRichTextSchema;
   declare [TypeSym]: "CoPlainText";
 
   declare $jazz: CoTextJazzApi<this>;
@@ -47,12 +51,17 @@ export class CoPlainText extends String implements CoValue {
       super(options.fromRaw.toString());
       const raw = options.fromRaw;
       Object.defineProperties(this, {
-        [TypeSym]: { value: "CoPlainText", enumerable: false },
+        [TypeSym]: {
+          value: "CoPlainText",
+          enumerable: false,
+          configurable: true,
+        },
         $jazz: {
           value: new CoTextJazzApi(this, raw),
           enumerable: false,
+          configurable: true,
         },
-        $isLoaded: { value: true, enumerable: false },
+        $isLoaded: { value: true, enumerable: false, configurable: true },
       });
       return;
     }
@@ -61,12 +70,17 @@ export class CoPlainText extends String implements CoValue {
       super(options.text);
       const raw = options.owner.$jazz.raw.createPlainText(options.text);
       Object.defineProperties(this, {
-        [TypeSym]: { value: "CoPlainText", enumerable: false },
+        [TypeSym]: {
+          value: "CoPlainText",
+          enumerable: false,
+          configurable: true,
+        },
         $jazz: {
           value: new CoTextJazzApi(this, raw),
           enumerable: false,
+          configurable: true,
         },
-        $isLoaded: { value: true, enumerable: false },
+        $isLoaded: { value: true, enumerable: false, configurable: true },
       });
       return;
     }
@@ -92,7 +106,7 @@ export class CoPlainText extends String implements CoValue {
   static create<T extends CoPlainText>(
     this: CoValueClass<T>,
     text: string,
-    options?: { owner: Account | Group } | Account | Group,
+    options?: CoValueCreateOptionsInternal,
   ) {
     const { owner } = parseCoValueCreateOptions(options);
     return new this({ text, owner });

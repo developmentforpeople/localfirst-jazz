@@ -35,6 +35,8 @@ type InsertionEntry<T extends JsonValue> = {
   predecessors: OpID[];
   successors: OpID[];
   change: InsertionOpPayload<T>;
+  /** Whether this entry comes from a valid transaction */
+  isValid: boolean;
 };
 
 type DeletionEntry = {
@@ -59,14 +61,14 @@ export class RawCoList<
   afterStart: OpID[] = [];
   beforeEnd: OpID[] = [];
   insertions: {
-    [sessionID: SessionID]: {
+    [sessionID: SessionIndex]: {
       [txIdx: number]: {
         [changeIdx: number]: InsertionEntry<Item>;
       };
     };
   } = {};
   deletionsByInsertion: {
-    [deletedSessionID: SessionID]: {
+    [deletedSessionID: SessionIndex]: {
       [deletedTxIdx: number]: {
         [deletedChangeIdx: number]: DeletionEntry[];
       };
@@ -90,6 +92,8 @@ export class RawCoList<
   lastValidTransaction: number | undefined;
   totalValidTransactions: number = 0;
 
+  #isDeletionRestricted: boolean;
+
   private resetInternalState() {
     this.afterStart = [];
     this.beforeEnd = [];
@@ -112,6 +116,10 @@ export class RawCoList<
     this.beforeEnd = [];
     this.knownTransactions = { [core.id]: 0 };
     this.atTimeFilter = atTimeFilter;
+
+    const ruleset = this.core.verified.header.ruleset;
+    this.#isDeletionRestricted =
+      ruleset.type === "ownedByGroup" && ruleset.restrictDeletion === true;
 
     this._processNewTransactions();
   }
@@ -206,10 +214,17 @@ export class RawCoList<
     this._processNewTransactions();
   }
 
+  private transactionContainsDeletion(changes: ListOpPayload<Item>[]) {
+    return changes.some((change) => change.op === "del");
+  }
+
   private _processNewTransactions() {
+    // Get all transactions including invalid ones, so that items referencing
+    // entries from invalid init transactions can still find their references.
     const transactions = this.core.getValidSortedTransactions({
       ignorePrivateTransactions: false,
       knownTransactions: this.knownTransactions,
+      includeInvalidMetaTransactions: true,
     });
 
     if (transactions.length === 0) {
@@ -220,15 +235,32 @@ export class RawCoList<
     let oldestValidTransaction: number | undefined = undefined;
     this._cachedEntries = undefined;
 
-    for (const { txID, changes, madeAt } of transactions) {
+    for (const { txID, changes, madeAt, isValid } of transactions) {
       if (this.isFilteredOut(madeAt)) {
         continue;
       }
-      lastValidTransaction = Math.max(lastValidTransaction ?? 0, madeAt);
-      oldestValidTransaction = Math.min(
-        oldestValidTransaction ?? Infinity,
-        madeAt,
-      );
+
+      if (
+        isValid &&
+        this.#isDeletionRestricted &&
+        this.transactionContainsDeletion(changes as ListOpPayload<Item>[])
+      ) {
+        const author = accountOrAgentIDfromSessionID(txID.sessionID);
+        const role = this.group.atTime(madeAt).roleOfInternal(author);
+
+        if (role !== "admin" && role !== "manager") {
+          continue;
+        }
+      }
+
+      // Only track valid transactions for the lastValidTransaction/oldestValidTransaction
+      if (isValid) {
+        lastValidTransaction = Math.max(lastValidTransaction ?? 0, madeAt);
+        oldestValidTransaction = Math.min(
+          oldestValidTransaction ?? Infinity,
+          madeAt,
+        );
+      }
 
       for (const [changeIdx, changeUntyped] of changes.entries()) {
         const change = changeUntyped as ListOpPayload<Item>;
@@ -246,6 +278,7 @@ export class RawCoList<
             predecessors: [],
             successors: [],
             change,
+            isValid,
           });
 
           // If the change index already exists, we don't need to process it again
@@ -378,6 +411,10 @@ export class RawCoList<
     return arr;
   }
 
+  length() {
+    return this.entries().length;
+  }
+
   /** @internal */
   entriesUncached(): {
     value: Item;
@@ -434,7 +471,9 @@ export class RawCoList<
 
         const deleted = this.isDeleted(currentOpID);
 
-        if (!deleted) {
+        // Skip entries that are deleted or from invalid transactions
+        // (e.g., losing init transactions in firstComesWins scenarios)
+        if (!deleted && entry.isValid) {
           arr.push({
             value: entry.change.value,
             madeAt: entry.madeAt,
@@ -559,6 +598,7 @@ export class RawCoList<
     items: Item[],
     after?: number,
     privacy: "private" | "trusting" = "private",
+    meta?: JsonObject,
   ) {
     const entries = this.entries();
     after =
@@ -593,7 +633,7 @@ export class RawCoList<
       changes.reverse();
     }
 
-    this.core.makeTransaction(changes, privacy);
+    this.core.makeTransaction(changes, privacy, meta);
     this.processNewTransactions();
   }
 
@@ -700,7 +740,9 @@ export class RawCoList<
   }
 }
 
-function getSessionIndex(txID: TransactionID): SessionID {
+type SessionIndex = SessionID | `${SessionID}_branch_${RawCoID}`;
+
+function getSessionIndex(txID: TransactionID): SessionIndex {
   if (txID.branch) {
     return `${txID.sessionID}_branch_${txID.branch}`;
   }

@@ -9,10 +9,13 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
+  SubscribeCallback,
   SubscribeListenerOptions,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  type Schema,
+  CoValueCreateOptions,
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -27,6 +30,12 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
+import {
+  coValueValidationSchema,
+  generateValidationSchemaFromItem,
+} from "./schemaValidators.js";
+import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
@@ -35,6 +44,7 @@ export class CoListSchema<
 {
   collaborative = true as const;
   builtin = "CoList" as const;
+  #descriptorsSchema: Schema | undefined = undefined;
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -43,38 +53,54 @@ export class CoListSchema<
    */
   resolveQuery: DefaultResolveQuery = true as DefaultResolveQuery;
 
+  #permissions: SchemaPermissions | null = null;
   /**
    * Permissions to be used when creating or composing CoValues
    * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
+
+  #validationSchema: z.ZodType | undefined = undefined;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const validationSchema = z.array(
+      generateValidationSchemaFromItem(this.element),
+    );
+
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoList);
+    return this.#validationSchema;
+  };
 
   constructor(
     public element: T,
     private coValueClass: typeof CoList,
   ) {}
 
+  getDescriptorsSchema = (): Schema => {
+    if (this.#descriptorsSchema) {
+      return this.#descriptorsSchema;
+    }
+
+    this.#descriptorsSchema = resolveSchemaField(this.element as any);
+
+    return this.#descriptorsSchema;
+  };
+
   create(
     items: CoListSchemaInit<T>,
-    options?:
-      | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Group,
+    options?: CoValueCreateOptions,
   ): CoListInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     items: CoListSchemaInit<T>,
-    options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Account
-      | Group,
+    options?: CoValueCreateOptions<{}, Account | Group>,
   ): CoListInstance<T>;
-  create(
-    items: CoListSchemaInit<T>,
-    options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Account
-      | Group,
-  ): CoListInstance<T> {
+  create(items: any, options?: any): CoListInstance<T> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
@@ -131,16 +157,44 @@ export class CoListSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
+    listener: SubscribeCallback<
+      Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>
+    >,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+    > = DefaultResolveQuery,
+  >(
+    id: string,
     options: SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>,
-    listener: (
-      value: Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>
+    >,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>>,
+  >(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>
+      | SubscribeCallback<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
+    maybeListener?: SubscribeCallback<
+      Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>
+    >,
   ): () => void {
+    if (typeof optionsOrListener === "function") {
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        optionsOrListener,
+      );
+    }
     return this.coValueClass.subscribe(
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+      maybeListener,
     );
   }
 
@@ -148,7 +202,7 @@ export class CoListSchema<
     return this.coValueClass;
   }
 
-  /** @deprecated Use `CoList.upsertUnique` and `CoList.loadUnique` instead. */
+  /** @deprecated Use `loadUnique` instead. */
   findUnique(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
@@ -157,6 +211,46 @@ export class CoListSchema<
     return this.coValueClass.findUnique(unique, ownerID, as);
   }
 
+  /**
+   * Get an existing unique CoList or create a new one if it doesn't exist.
+   *
+   * Unlike `upsertUnique`, this method does NOT update existing values with the provided value.
+   * The provided value is only used when creating a new CoList.
+   *
+   * @example
+   * ```ts
+   * const items = await ItemList.getOrCreateUnique({
+   *   value: [item1, item2, item3],
+   *   unique: ["user-items", me.id],
+   *   owner: me,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoList.
+   * @returns Either an existing CoList (unchanged), or a new initialised CoList if none exists.
+   * @category Subscription & Loading
+   */
+  getOrCreateUnique<
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+    > = DefaultResolveQuery,
+  >(options: {
+    value: CoListSchemaInit<T>;
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Account | Group;
+    resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
+  }): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
+    // @ts-expect-error
+    return this.coValueClass.getOrCreateUnique(
+      // @ts-expect-error
+      withSchemaResolveQuery(options, this.resolveQuery),
+    );
+  }
+
+  /**
+   * @deprecated Use `getOrCreateUnique` instead. Note: getOrCreateUnique does not update existing values.
+   * If you need to update, use getOrCreateUnique followed by `$jazz.applyDiff`.
+   */
   upsertUnique<
     const R extends RefsToResolve<
       CoListInstanceCoValuesMaybeLoaded<T>
@@ -233,7 +327,7 @@ export class CoListSchema<
       hydrateCoreCoValueSchema(coreSchema);
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
-    copy.permissions = permissions ?? this.permissions;
+    copy.#permissions = permissions ?? this.#permissions;
     return copy;
   }
 }
@@ -241,11 +335,23 @@ export class CoListSchema<
 export function createCoreCoListSchema<T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoreCoListSchema<T> {
+  let descriptorsSchema: Schema | undefined;
+
   return {
     collaborative: true as const,
     builtin: "CoList" as const,
     element,
+    getDescriptorsSchema: () => {
+      if (descriptorsSchema) {
+        return descriptorsSchema;
+      }
+
+      descriptorsSchema = resolveSchemaField(element as any);
+
+      return descriptorsSchema;
+    },
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -255,6 +361,7 @@ export interface CoreCoListSchema<
 > extends CoreCoValueSchema {
   builtin: "CoList";
   element: T;
+  getDescriptorsSchema: () => Schema;
 }
 
 export type CoListInstance<T extends AnyZodOrCoValueSchema> = CoList<

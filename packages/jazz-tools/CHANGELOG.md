@@ -1,5 +1,228 @@
 # jazz-tools
 
+## 0.20.11
+
+### Patch Changes
+
+- 191ce7a: Mark CoValue migration failures as unavailable instead of throwing behavior.
+
+  When a migration throws (for example, async migrations or write attempts without permissions), loading now resolves to a CoValue with `$jazz.loadingState === "unavailable"`.
+
+- Updated dependencies [d91408c]
+  - cojson@0.20.11
+  - cojson-storage-indexeddb@0.20.11
+  - cojson-transport-ws@0.20.11
+
+## 0.20.10
+
+### Patch Changes
+
+- 706ab57: Added optional restricted deletion mode for CoList values, allowing only manager/admin roles to perform deletions when enabled via schema permissions: `co.list().withPermission({writer: "appendOnly"})`
+- 01c3641: Add optional `navigation` prop to `JazzSvelteProvider` that automatically waits for pending CoValue syncs before SvelteKit navigations, preventing stale data on SSR pages.
+- 796c65b: **BREAKING:** The `in` operator on CoMap instances now returns `true` for all schema-defined keys, even if the value is `undefined` or has been deleted. This fixes a fatal `TypeError` on React Native 0.84+ (Hermes V1) caused by proxy invariant violations.
+
+  Previously, `"key" in coMap` returned `false` for unset/deleted optional properties. Now it returns `true` for any key with a schema descriptor, consistent with `Object.keys()` and `Object.getOwnPropertyDescriptor()`.
+
+  To check whether a key has an actual value set, use `coMap.$jazz.has("key")` instead of the `in` operator.
+
+  Also adds `configurable: true` to all internal property definitions (`$jazz`, `$isLoaded`, `[TypeSym]`, `_instanceID`) across all CoValue types to satisfy ES2015 proxy invariants enforced by Hermes V1.
+
+- 81c3a0a: Replaced a vulnerable dependency with a local implementation, removing transitive vulnerabilities.
+- cdcdad1: Introduced runtime validation for schema-based CoValues. All mutations now accept a `validation` option of `strict` or `loose`. `setDefaultValidationMode()` can also be used to enable or disable validation across the entire app. Currently, the default validation mode is `warn`: updates and inserts of invalid data will still be allowed, but a console warning will be issued. The usage of `setDefaultValidationMode("strict")` is encouraged, as it will be the default mode in the future.
+- 1317e90: Removed the legacy `coField` and `Encoders` exports and completed the runtime schema migration to the new schema descriptors. Apps still using the old schema APIs should migrate to the current `co`/zod based schemas.
+- 76c6229: Reuse Expo & OP-SQLite DB client across Jazz providers
+- e707d3c: Add contextual hints to the "unable to load" error message when sync is disabled (`when: "never"`) or restricted (`when: "signedUp"`).
+- Updated dependencies [706ab57]
+- Updated dependencies [3f50adb]
+- Updated dependencies [283ff4f]
+- Updated dependencies [93c220c]
+- Updated dependencies [41d8587]
+  - cojson@0.20.10
+  - cojson-transport-ws@0.20.10
+  - cojson-storage-indexeddb@0.20.10
+
+## 0.20.9
+
+### Patch Changes
+
+- 75ecd19: Reverted the Expo SQLite adapter to use non-exclusive transactions, to fix the "database is locked" error when read queries are executed in the middle of a transaction.
+  - cojson@0.20.9
+  - cojson-storage-indexeddb@0.20.9
+  - cojson-transport-ws@0.20.9
+
+## 0.20.8
+
+### Patch Changes
+
+- 8688239: Add `getOrCreateUnique` method to CoMap, CoList, and CoFeed
+
+  This new method provides a "get or create only" semantic - it returns an existing value as-is, and only uses the provided value when creating a new CoValue. Unlike `upsertUnique`, it does NOT update existing values with the provided value.
+
+  Example usage:
+
+  ```typescript
+  const billingStatus = await BillingStatus.getOrCreateUnique({
+    value: { status: "pending" },
+    unique: `billing-${user.$jazz.id}`,
+    owner: billingGroup,
+  });
+  ```
+
+  Also deprecates `loadUnique` and `upsertUnique` methods in favor of `getOrCreateUnique`.
+
+- fc4163a: Delayed CoValue content parsing in subscriptions until the value is fully downloaded, avoiding unnecessary intermediate parsing
+- c7be307: Improved FileStream base64 encoding performance by using `bytesToBase64url` instead of `btoa` with `String.fromCharCode`. Added native `toBase64`/`fromBase64` support in cojson when available.
+
+  **Benchmark results (5MB file):**
+  - `asBase64`: 732.39 op/sec vs 49.78 op/sec (**+1371.36% faster**)
+  - `write`: 12.53 op/sec vs 12.19 op/sec (+2.79%)
+  - `getChunks`: 695.03 op/sec vs 153.89 op/sec (**+351.64% faster**)
+
+- 739ea48: Fixed createdAt getter to use CoValue's header
+- b38a526: fix: prevent conflicts between concurrent async SQLite transactions
+- f701fd7: Added optional `name` metadata to Groups. Groups can now be created with a display name (e.g. `Group.create({ owner: account, name: "Engineering" })`)
+- 0fa9e15: Fix issue with CoRecord serialisation
+- Updated dependencies [c7be307]
+- Updated dependencies [b38a526]
+- Updated dependencies [f701fd7]
+- Updated dependencies [99f9d47]
+  - cojson@0.20.8
+  - cojson-storage-indexeddb@0.20.8
+  - cojson-transport-ws@0.20.8
+
+## 0.20.7
+
+### Patch Changes
+
+- Updated dependencies [988941c]
+  - cojson@0.20.7
+  - cojson-transport-ws@0.20.7
+  - cojson-storage-indexeddb@0.20.7
+
+## 0.20.6
+
+### Patch Changes
+
+- Updated dependencies [cdf8274]
+  - cojson@0.20.6
+  - cojson-storage-indexeddb@0.20.6
+  - cojson-transport-ws@0.20.6
+
+## 0.20.5
+
+### Patch Changes
+
+- 23a5d7c: Fixed "TypeError: crypto.randomUUID is not a function (it is undefined)" on React Native
+- 0b95532: Fixed "can't access property useContext, dispatcher is null" error when using the inspector in Svelte
+  - cojson@0.20.5
+  - cojson-storage-indexeddb@0.20.5
+  - cojson-transport-ws@0.20.5
+
+## 0.20.4
+
+### Patch Changes
+
+- 0c749d9: Fixed infinite re-render loop when accessing unresolved nested CoValues in React hooks
+  - cojson@0.20.4
+  - cojson-storage-indexeddb@0.20.4
+  - cojson-transport-ws@0.20.4
+
+## 0.20.3
+
+### Patch Changes
+
+- Updated dependencies [eca8b83]
+  - cojson@0.20.3
+  - cojson-storage-indexeddb@0.20.3
+  - cojson-transport-ws@0.20.3
+
+## 0.20.2
+
+### Patch Changes
+
+- 2df568f: Added a Performance tab in the Jazz tools inspector
+- Updated dependencies [251a89e]
+  - cojson@0.20.2
+  - cojson-storage-indexeddb@0.20.2
+  - cojson-transport-ws@0.20.2
+
+## 0.20.1
+
+### Patch Changes
+
+- ca306c0: Fixed `CoList` to return the correct length when calling `getOwnPropertyDescriptor` with `length`. Previously it was always returning 0.
+- d7f9cba: `setDefaultSchemaPermissions` now modifies existing CoValue schemas
+- Updated dependencies [03195eb]
+  - cojson@0.20.1
+  - cojson-storage-indexeddb@0.20.1
+  - cojson-transport-ws@0.20.1
+
+## 0.20.0
+
+### Minor Changes
+
+- ee19292: Removed `JazzContextManagerContext` and added error when nesting `JazzProvider` components. This prevents bad patterns like nested providers and simplifies the alternative approach of using `JazzContext.Provider` directly with `useJazzContext()`.
+
+  ### Breaking changes
+  - Removed `JazzContextManagerContext` export from `jazz-tools/react-core`
+  - Renamed `useJazzContext` to `useJazzContextValue` (returns the context value)
+  - `useJazzContext` now returns the context manager instead of the context value
+  - Nesting `JazzProvider` components now throws an error
+
+  ### Migration
+
+  If you were using `useJazzContext` to get the context value, rename it to `useJazzContextValue`:
+
+  ```diff
+  - import { useJazzContext } from "jazz-tools/react-core";
+  + import { useJazzContextValue } from "jazz-tools/react-core";
+
+  - const context = useJazzContext();
+  + const context = useJazzContextValue();
+  ```
+
+  If you need to provide context to children without creating a new context (e.g., for components that don't propagate React context), use:
+
+  ```tsx
+  <JazzContext.Provider value={useJazzContext()}>
+    {children}
+  </JazzContext.Provider>
+  ```
+
+- 8934d8a: ## Full native crypto (0.20.0)
+
+  With this release we complete the migration to a pure Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+
+  ## 💥 Breaking changes
+
+  ### Crypto providers / fallback behavior
+  - **Removed `PureJSCrypto`** from `cojson` (including the `cojson/crypto/PureJSCrypto` export).
+  - **Removed `RNQuickCrypto`** from `jazz-tools`.
+  - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
+  - **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
+
+  Full migration guide: `https://jazz.tools/docs/upgrade/0-20-0`
+
+### Patch Changes
+
+- 6b9368a: Added `deleteCoValues` function to permanently delete CoValues and their nested references.
+  - CoValues are marked with a tombstone, making them inaccessible to all users
+  - Supports deleting nested CoValues via resolve queries
+  - Requires admin permissions on the CoValue's group
+  - Introduces new `deleted` loading state for deleted CoValues
+  - Groups and Accounts are skipped during deletion
+
+  See documentation: https://jazz.tools/docs/react/core-concepts/deleting
+
+- Updated dependencies [6b9368a]
+- Updated dependencies [89332d5]
+- Updated dependencies [f562a1f]
+- Updated dependencies [b5ada4d]
+- Updated dependencies [8934d8a]
+  - cojson@0.20.0
+  - cojson-storage-indexeddb@0.20.0
+  - cojson-transport-ws@0.20.0
+
 ## 0.19.22
 
 ### Patch Changes
@@ -477,7 +700,6 @@
 ### Patch Changes
 
 - f2f478a: Add connection status API for React and Svelte
-
   - **React**: Added `useSyncConnectionStatus()` hook that returns the current connection status to the Jazz sync server
   - **Svelte**: Added `SyncConnectionStatus` class that provides reactive connection status monitoring
 
@@ -513,7 +735,6 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
-
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -897,7 +1118,6 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
-
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

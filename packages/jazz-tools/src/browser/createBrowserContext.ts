@@ -21,7 +21,6 @@ import {
   createAnonymousJazzContext,
 } from "jazz-tools";
 import { createJazzContext } from "jazz-tools";
-import { StorageConfig, getStorageOptions } from "./storageOptions.js";
 import { setupInspector } from "./utils/export-account-inspector.js";
 import { getBrowserLockSessionProvider } from "./provideBrowserLockSession/index.js";
 
@@ -33,7 +32,7 @@ setupInspector();
 export type BaseBrowserContextOptions = {
   sync: SyncConfig;
   reconnectionTimeout?: number;
-  storage?: StorageConfig;
+  storage?: "indexedDB";
   crypto?: CryptoProvider;
   authSecretStorage: AuthSecretStorage;
 };
@@ -56,11 +55,9 @@ export async function setupPeers(options: BaseBrowserContextOptions) {
   const crypto = options.crypto || (await WasmCrypto.create());
   let node: LocalNode | undefined = undefined;
 
-  const { useIndexedDB } = getStorageOptions(options.storage);
-
   const peers: Peer[] = [];
 
-  const storage = useIndexedDB ? await getIndexedDBStorage() : undefined;
+  const storage = await getIndexedDBStorage();
 
   if (options.sync.when === "never") {
     return {

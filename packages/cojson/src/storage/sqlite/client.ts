@@ -12,11 +12,15 @@ import type {
   DBTransactionInterfaceSync,
   SessionRow,
   SignatureAfterRow,
+  StorageReconciliationLockRow,
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
+  StorageReconciliationAcquireResult,
 } from "../types.js";
+import { DeletedCoValueDeletionStatus } from "../types.js";
 import type { SQLiteDatabaseDriver } from "./types.js";
+import { STORAGE_RECONCILIATION_CONFIG } from "../../config.js";
 
 export type RawCoValueRow = {
   id: RawCoID;
@@ -27,6 +31,10 @@ export type RawTransactionRow = {
   ses: number;
   idx: number;
   tx: string;
+};
+
+type DeletedCoValueQueueRow = {
+  id: RawCoID;
 };
 
 export function getErrorMessage(error: unknown) {
@@ -143,6 +151,78 @@ export class SQLiteClient
     return result.rowID;
   }
 
+  markCoValueAsDeleted(id: RawCoID) {
+    // Work queue entry. Table only stores the coValueID.
+    // Idempotent by design.
+    this.db.run(
+      `INSERT INTO deletedCoValues (coValueID) VALUES (?) ON CONFLICT(coValueID) DO NOTHING`,
+      [id],
+    );
+  }
+
+  eraseCoValueButKeepTombstone(coValueId: RawCoID) {
+    const coValueRow = this.db.get<{ rowID: number }>(
+      "SELECT rowID FROM coValues WHERE id = ?",
+      [coValueId],
+    );
+
+    if (!coValueRow) {
+      logger.warn(`CoValue ${coValueId} not found, skipping deletion`);
+      return;
+    }
+
+    this.transaction(() => {
+      this.db.run(
+        `DELETE FROM transactions
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%$'
+       )`,
+        [coValueRow.rowID],
+      );
+
+      this.db.run(
+        `DELETE FROM signatureAfter
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%$'
+       )`,
+        [coValueRow.rowID],
+      );
+
+      this.db.run(
+        `DELETE FROM sessions
+       WHERE coValue = ?
+         AND sessionID NOT LIKE '%$'`,
+        [coValueRow.rowID],
+      );
+
+      // Mark the delete as done
+      this.db.run(
+        `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
+       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
+        [
+          coValueId,
+          DeletedCoValueDeletionStatus.Done,
+          DeletedCoValueDeletionStatus.Done,
+        ],
+      );
+    });
+  }
+
+  getAllCoValuesWaitingForDelete(): RawCoID[] {
+    return this.db
+      .query<DeletedCoValueQueueRow>(
+        `SELECT coValueID as id
+         FROM deletedCoValues
+         WHERE status = ?`,
+        [DeletedCoValueDeletionStatus.Pending],
+      )
+      .map((r) => r.id);
+  }
+
   addSessionUpdate({ sessionUpdate }: { sessionUpdate: SessionRow }): number {
     const result = this.db.get<{ rowID: number }>(
       `INSERT INTO sessions (coValue, sessionID, lastIdx, lastSignature, bytesSinceLastSignature) VALUES (?, ?, ?, ?, ?)
@@ -191,9 +271,53 @@ export class SQLiteClient
     );
   }
 
+  getStorageReconciliationLock(
+    key: string,
+  ): StorageReconciliationLockRow | undefined {
+    return this.db.get<StorageReconciliationLockRow>(
+      "SELECT * FROM storageReconciliationLocks WHERE key = ?",
+      [key],
+    );
+  }
+
+  putStorageReconciliationLock(entry: StorageReconciliationLockRow): void {
+    const {
+      key,
+      holderSessionId,
+      acquiredAt,
+      releasedAt,
+      lastProcessedOffset,
+    } = entry;
+    this.db.run(
+      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?)`,
+      [
+        key,
+        holderSessionId,
+        acquiredAt,
+        releasedAt ?? null,
+        lastProcessedOffset,
+      ],
+    );
+  }
+
   transaction(operationsCallback: (tx: DBTransactionInterfaceSync) => unknown) {
     this.db.transaction(() => operationsCallback(this));
     return undefined;
+  }
+
+  getCoValueIDs(limit: number, offset: number): { id: RawCoID }[] {
+    return this.db.query<{ id: RawCoID }>(
+      "SELECT id FROM coValues WHERE rowID > ? ORDER BY rowID LIMIT ?",
+      [offset, limit],
+    );
+  }
+
+  getCoValueCount(): number {
+    const row = this.db.get<{ count: number }>(
+      "SELECT COUNT(*) as count FROM coValues",
+      [],
+    );
+    return row?.count ?? 0;
   }
 
   getUnsyncedCoValueIDs(): RawCoID[] {
@@ -224,6 +348,87 @@ export class SQLiteClient
 
   stopTrackingSyncState(id: RawCoID): void {
     this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [id]);
+  }
+
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): StorageReconciliationAcquireResult {
+    let result: StorageReconciliationAcquireResult = {
+      acquired: false,
+      reason: "not_due",
+    };
+    this.transaction(() => {
+      const now = Date.now();
+      const lockKey = `lock#${peerId}`;
+      const lockRow = this.getStorageReconciliationLock(lockKey);
+      if (
+        lockRow?.releasedAt &&
+        now - lockRow.releasedAt <
+          STORAGE_RECONCILIATION_CONFIG.RECONCILIATION_INTERVAL_MS
+      ) {
+        result = { acquired: false, reason: "not_due" };
+        return;
+      }
+      const expiresAt = lockRow
+        ? lockRow.acquiredAt + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS
+        : 0;
+      const isLockHeldByOtherSession = lockRow?.holderSessionId !== sessionId;
+      if (
+        lockRow &&
+        !lockRow.releasedAt &&
+        expiresAt >= now &&
+        isLockHeldByOtherSession
+      ) {
+        result = { acquired: false, reason: "lock_held" };
+        return;
+      }
+
+      const lastProcessedOffset =
+        lockRow && !lockRow.releasedAt ? (lockRow.lastProcessedOffset ?? 0) : 0;
+      this.putStorageReconciliationLock({
+        key: lockKey,
+        holderSessionId: sessionId,
+        acquiredAt: now,
+        lastProcessedOffset,
+      });
+      result = { acquired: true, lastProcessedOffset };
+    });
+    return result;
+  }
+
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void {
+    const lockKey = `lock#${peerId}`;
+    const lockRow = this.getStorageReconciliationLock(lockKey);
+    if (
+      lockRow &&
+      lockRow.holderSessionId === sessionId &&
+      !lockRow.releasedAt
+    ) {
+      this.putStorageReconciliationLock({
+        ...lockRow,
+        lastProcessedOffset: offset,
+      });
+    }
+  }
+
+  releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void {
+    this.transaction(() => {
+      const lockKey = `lock#${peerId}`;
+      const releasedAt = Date.now();
+      const lockRow = this.getStorageReconciliationLock(lockKey);
+      if (lockRow?.holderSessionId === sessionId) {
+        this.putStorageReconciliationLock({
+          ...lockRow,
+          releasedAt,
+          lastProcessedOffset: 0,
+        });
+      }
+    });
   }
 
   getCoValueKnownState(coValueId: string): CoValueKnownState | undefined {

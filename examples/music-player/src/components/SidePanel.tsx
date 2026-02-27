@@ -42,8 +42,8 @@ export function SidePanel() {
 
   async function handleDeletePlaylist(playlistId: string) {
     if (confirm("Are you sure you want to delete this playlist?")) {
+      navigate(`/`); // We navigate first to avoid that the delete triggers an error boundary on the Router.
       await deletePlaylist(playlistId);
-      navigate(`/`);
     }
   }
 
@@ -153,11 +153,13 @@ export function SidePanel() {
       </Sidebar>
 
       {/* Create Playlist Modal */}
-      <CreatePlaylistModal
-        isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
-        onPlaylistCreated={handlePlaylistCreated}
-      />
+      {isCreateModalOpen && (
+        <CreatePlaylistModal
+          isOpen={isCreateModalOpen}
+          onClose={() => setIsCreateModalOpen(false)}
+          onPlaylistCreated={handlePlaylistCreated}
+        />
+      )}
     </>
   );
 }

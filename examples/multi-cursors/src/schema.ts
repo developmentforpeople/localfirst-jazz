@@ -1,9 +1,10 @@
-import { co, z } from "jazz-tools";
+import { co, z, setDefaultValidationMode } from "jazz-tools";
 import { Camera, Cursor } from "./types";
 
-export const CursorFeed = co.feed(Cursor).withPermissions({
-  onInlineCreate: "sameAsContainer",
-});
+setDefaultValidationMode("strict");
+
+export const CursorFeed = co.feed(Cursor);
+export type CursorFeed = co.loaded<typeof CursorFeed>;
 
 export const CursorProfile = co
   .profile({
@@ -17,10 +18,6 @@ export const CursorProfile = co
 export const CursorRoot = co.map({
   camera: Camera,
   cursors: CursorFeed,
-});
-
-export const CursorContainer = co.map({
-  cursorFeed: CursorFeed,
 });
 
 export const CursorAccount = co

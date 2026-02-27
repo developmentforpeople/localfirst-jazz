@@ -1,6 +1,7 @@
 import {
-  SessionLog,
+  SessionMap as WasmSessionMap,
   initialize,
+  initializeSync,
   Blake3Hasher,
   blake3HashOnce,
   blake3HashOnceWithContext,
@@ -11,40 +12,63 @@ import {
   newEd25519SigningKey,
   newX25519PrivateKey,
   seal,
+  sealForGroup,
+  shortHash,
   sign,
   unseal,
+  unsealForGroup,
   verify,
 } from "cojson-core-wasm";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
-import { RawCoID, SessionID, TransactionID } from "../ids.js";
+import { RawCoID, TransactionID } from "../ids.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
-import { JsonObject, JsonValue } from "../jsonValue.js";
+import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { PureJSCrypto } from "./PureJSCrypto.js";
 import {
   CryptoProvider,
   Encrypted,
-  KeyID,
   KeySecret,
   Sealed,
+  SealedForGroup,
   SealerID,
   SealerSecret,
+  SessionMapImpl,
+  ShortHash,
   Signature,
   SignerID,
   SignerSecret,
   textDecoder,
   textEncoder,
 } from "./crypto.js";
-import { ControlledAccountOrAgent } from "../coValues/account.js";
-import {
-  PrivateTransaction,
-  Transaction,
-  TrustingTransaction,
-} from "../coValueCore/verifiedState.js";
+import { isCloudflare, isEvalAllowed } from "../platformUtils.js";
 
 type Blake3State = Blake3Hasher;
 
 let wasmInit = initialize;
+let wasmInitSync = initializeSync;
+
+const wasmCryptoErrorMessage = (
+  e: unknown,
+) => `Critical Error: Failed to load WASM module
+
+${!isEvalAllowed() ? `You need to add \`import "jazz-tools/load-edge-wasm";\` on top of your entry module to make Jazz work with ${isCloudflare() ? "Cloudflare workers" : "this runtime"}` : (e as Error).message}
+
+A native crypto module is required for Jazz to work. See https://jazz.tools/docs/react/reference/performance#use-the-best-crypto-implementation-for-your-platform for possible alternatives.`;
+
+/**
+ * Initializes the WasmCrypto module. This function can be used to initialize the WasmCrypto module in a worker or a browser.
+ * if you are using SSR and you want to initialize WASM crypto asynchronously you can use this function.
+ * @returns A promise that resolves when the WasmCrypto module is successfully initialized.
+ */
+export async function initWasmCrypto() {
+  try {
+    await wasmInit();
+  } catch (e) {
+    throw new Error(wasmCryptoErrorMessage(e), { cause: e });
+  }
+}
+
 /**
  * WebAssembly implementation of the CryptoProvider interface using cojson-core-wasm.
  * This provides the primary implementation using WebAssembly for optimal performance, offering:
@@ -54,7 +78,7 @@ let wasmInit = initialize;
  * - Hashing (BLAKE3)
  */
 export class WasmCrypto extends CryptoProvider<Blake3State> {
-  private constructor() {
+  protected constructor() {
     super();
   }
 
@@ -62,17 +86,23 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     wasmInit = value;
   }
 
-  static async create(): Promise<WasmCrypto | PureJSCrypto> {
-    try {
-      await wasmInit();
-    } catch (e) {
-      logger.warn(
-        "Failed to initialize WasmCrypto, falling back to PureJSCrypto",
-        { err: e },
-      );
-      return new PureJSCrypto();
-    }
+  static setInitSync(value: typeof initializeSync) {
+    wasmInitSync = value;
+  }
 
+  static createSync(): WasmCrypto {
+    try {
+      wasmInitSync();
+    } catch (e) {
+      throw new Error(wasmCryptoErrorMessage(e), { cause: e });
+    }
+    return new WasmCrypto();
+  }
+
+  // TODO: Remove this method and use createSync instead, this is not necessary since we can use createSync in the browser and in the worker.
+  // @deprecated
+  static async create(): Promise<WasmCrypto> {
+    await initWasmCrypto();
     return new WasmCrypto();
   }
 
@@ -85,6 +115,10 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     { context }: { context: Uint8Array },
   ) {
     return blake3HashOnceWithContext(data, context);
+  }
+
+  shortHash(value: JsonValue): ShortHash {
+    return shortHash(stableStringify(value)) as ShortHash;
   }
 
   newEd25519SigningKey(): Uint8Array {
@@ -191,99 +225,218 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     }
   }
 
-  createSessionLog(coID: RawCoID, sessionID: SessionID, signerID?: SignerID) {
-    return new SessionLogAdapter(new SessionLog(coID, sessionID, signerID));
+  sealForGroup<T extends JsonValue>({
+    message,
+    to,
+    nOnceMaterial,
+  }: {
+    message: T;
+    to: SealerID;
+    nOnceMaterial: { in: RawCoID; tx: TransactionID };
+  }): SealedForGroup<T> {
+    return `sealedForGroup_U${bytesToBase64url(
+      sealForGroup(
+        textEncoder.encode(stableStringify(message)),
+        to,
+        textEncoder.encode(stableStringify(nOnceMaterial)),
+      ),
+    )}` as SealedForGroup<T>;
+  }
+
+  unsealForGroup<T extends JsonValue>(
+    sealed: SealedForGroup<T>,
+    groupSealerSecret: SealerSecret,
+    nOnceMaterial: { in: RawCoID; tx: TransactionID },
+  ): T | undefined {
+    try {
+      const plaintext = textDecoder.decode(
+        unsealForGroup(
+          base64URLtoBytes(sealed.substring("sealedForGroup_U".length)),
+          groupSealerSecret,
+          textEncoder.encode(stableStringify(nOnceMaterial)),
+        ),
+      );
+      return JSON.parse(plaintext) as T;
+    } catch (e) {
+      logger.error("Failed to decrypt/parse sealed for group message", {
+        err: e,
+      });
+      return undefined;
+    }
+  }
+
+  createSessionMap(
+    coID: RawCoID,
+    headerJson: string,
+    maxTxSize?: number,
+    skipVerify?: boolean,
+  ): SessionMapImpl {
+    return new SessionMapAdapter(
+      new WasmSessionMap(coID, headerJson, maxTxSize, skipVerify),
+    );
   }
 }
 
-class SessionLogAdapter {
-  constructor(private readonly sessionLog: SessionLog) {}
+/**
+ * Adapter wrapping WasmSessionMap to implement SessionMapImpl interface
+ */
+class SessionMapAdapter implements SessionMapImpl {
+  constructor(private readonly sessionMap: WasmSessionMap) {}
 
-  tryAdd(
-    transactions: Transaction[],
-    newSignature: Signature,
+  // === Header ===
+  getHeader(): string {
+    return this.sessionMap.getHeader();
+  }
+
+  // === Transaction Operations ===
+  addTransactions(
+    sessionId: string,
+    signerId: string | undefined,
+    transactionsJson: string,
+    signature: string,
     skipVerify: boolean,
   ): void {
-    this.sessionLog.tryAdd(
-      transactions.map((tx) => stableStringify(tx)),
-      newSignature,
+    this.sessionMap.addTransactions(
+      sessionId,
+      signerId,
+      transactionsJson,
+      signature,
       skipVerify,
     );
   }
 
-  addNewPrivateTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    keyID: KeyID,
-    keySecret: KeySecret,
+  makeNewPrivateTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | undefined,
     madeAt: number,
-    meta: JsonObject | undefined,
-  ): { signature: Signature; transaction: PrivateTransaction } {
-    const output = this.sessionLog.addNewPrivateTransaction(
-      stableStringify(changes),
-      signerAgent.currentSignerSecret(),
-      keySecret,
-      keyID,
-      madeAt,
-      meta ? stableStringify(meta) : undefined,
-    );
-    const parsedOutput = JSON.parse(output);
-    const transaction: PrivateTransaction = {
-      privacy: "private",
-      madeAt,
-      encryptedChanges: parsedOutput.encrypted_changes,
-      keyUsed: keyID,
-      meta: parsedOutput.meta,
-    };
-    return { signature: parsedOutput.signature, transaction };
-  }
-
-  addNewTrustingTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    madeAt: number,
-    meta: JsonObject | undefined,
-  ): { signature: Signature; transaction: TrustingTransaction } {
-    const stringifiedChanges = stableStringify(changes);
-    const stringifiedMeta = meta ? stableStringify(meta) : undefined;
-    const output = this.sessionLog.addNewTrustingTransaction(
-      stringifiedChanges,
-      signerAgent.currentSignerSecret(),
-      madeAt,
-      stringifiedMeta,
-    );
-    const transaction: TrustingTransaction = {
-      privacy: "trusting",
-      madeAt,
-      changes: stringifiedChanges,
-      meta: stringifiedMeta,
-    };
-    return { signature: output as Signature, transaction };
-  }
-
-  decryptNextTransactionChangesJson(
-    txIndex: number,
-    keySecret: KeySecret,
   ): string {
-    const output = this.sessionLog.decryptNextTransactionChangesJson(
-      txIndex,
+    return this.sessionMap.makeNewPrivateTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      keyId,
       keySecret,
+      metaJson,
+      madeAt,
     );
-    return output;
   }
 
-  decryptNextTransactionMetaJson(
+  makeNewTrustingTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string {
+    return this.sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      metaJson,
+      madeAt,
+    );
+  }
+
+  // === Session Queries ===
+  getSessionIds(): string[] {
+    return this.sessionMap.getSessionIds();
+  }
+
+  getTransactionCount(sessionId: string): number {
+    return this.sessionMap.getTransactionCount(sessionId);
+  }
+
+  getTransaction(sessionId: string, txIndex: number): Transaction | undefined {
+    const result = this.sessionMap.getTransaction(sessionId, txIndex);
+    if (!result) return undefined;
+    return JSON.parse(result) as Transaction;
+  }
+
+  getSessionTransactions(
+    sessionId: string,
+    fromIndex: number,
+  ): Transaction[] | undefined {
+    const result = this.sessionMap.getSessionTransactions(sessionId, fromIndex);
+    if (!result) return undefined;
+    return result.map((tx) => JSON.parse(tx) as Transaction);
+  }
+
+  getLastSignature(sessionId: string): string | undefined {
+    return this.sessionMap.getLastSignature(sessionId) ?? undefined;
+  }
+
+  getSignatureAfter(sessionId: string, txIndex: number): string | undefined {
+    return this.sessionMap.getSignatureAfter(sessionId, txIndex) ?? undefined;
+  }
+
+  getLastSignatureCheckpoint(sessionId: string): number | undefined {
+    return this.sessionMap.getLastSignatureCheckpoint(sessionId) ?? undefined;
+  }
+
+  // === Known State ===
+  getKnownState(): {
+    id: string;
+    header: boolean;
+    sessions: Record<string, number>;
+  } {
+    // WASM returns a native JS object via serde_wasm_bindgen
+    return this.sessionMap.getKnownState() as {
+      id: string;
+      header: boolean;
+      sessions: Record<string, number>;
+    };
+  }
+
+  getKnownStateWithStreaming():
+    | { id: string; header: boolean; sessions: Record<string, number> }
+    | undefined {
+    // WASM returns a native JS object via serde_wasm_bindgen, or undefined
+    const result = this.sessionMap.getKnownStateWithStreaming();
+    if (!result || result === undefined) return undefined;
+    return result as {
+      id: string;
+      header: boolean;
+      sessions: Record<string, number>;
+    };
+  }
+
+  setStreamingKnownState(streamingJson: string): void {
+    this.sessionMap.setStreamingKnownState(streamingJson);
+  }
+
+  // === Deletion ===
+  markAsDeleted(): void {
+    this.sessionMap.markAsDeleted();
+  }
+
+  isDeleted(): boolean {
+    return this.sessionMap.isDeleted();
+  }
+
+  // === Decryption ===
+  decryptTransaction(
+    sessionId: string,
     txIndex: number,
-    keySecret: KeySecret,
+    keySecret: string,
   ): string | undefined {
-    return this.sessionLog.decryptNextTransactionMetaJson(txIndex, keySecret);
+    return (
+      this.sessionMap.decryptTransaction(sessionId, txIndex, keySecret) ??
+      undefined
+    );
   }
 
-  free() {
-    this.sessionLog.free();
-  }
-
-  clone(): SessionLogAdapter {
-    return new SessionLogAdapter(this.sessionLog.clone());
+  decryptTransactionMeta(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined {
+    return (
+      this.sessionMap.decryptTransactionMeta(sessionId, txIndex, keySecret) ??
+      undefined
+    );
   }
 }

@@ -1,10 +1,10 @@
 import { Toaster } from "@/components/ui/toaster";
-import { JazzInspector } from "jazz-tools/inspector";
+import { JazzInspector, enableProfiling } from "jazz-tools/inspector";
 /* eslint-disable react-refresh/only-export-components */
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { RouterProvider, createHashRouter } from "react-router-dom";
-import { HomePage } from "./3_HomePage";
+import { PlaylistPage } from "./3_PlaylistPage";
 import { useMediaPlayer } from "./5_useMediaPlayer";
 import { InvitePage } from "./6_InvitePage";
 import { SettingsPage } from "./7_SettingsPage";
@@ -17,8 +17,12 @@ import { apiKey } from "@/apiKey.ts";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { JazzReactProvider, useSuspenseAccount } from "jazz-tools/react";
 import { onAnonymousAccountDiscarded } from "./4_actions";
-import { KeyboardListener } from "./components/PlayerControls";
 import { useSetupAppState } from "./lib/useSetupAppState";
+
+// Normally profiling is enabled only in development mode
+// but we enable it for the music player example to show
+// profiling data in the production environment
+enableProfiling();
 
 /**
  * Walkthrough: The top-level provider `<JazzReactProvider/>`
@@ -51,7 +55,7 @@ function AppContent({
       path: "/",
       element: (
         <ErrorBoundary>
-          <HomePage mediaPlayer={mediaPlayer} />
+          <PlaylistPage mediaPlayer={mediaPlayer} />
         </ErrorBoundary>
       ),
     },
@@ -59,7 +63,7 @@ function AppContent({
       path: "/playlist/:playlistId",
       element: (
         <ErrorBoundary>
-          <HomePage mediaPlayer={mediaPlayer} />
+          <PlaylistPage mediaPlayer={mediaPlayer} />
         </ErrorBoundary>
       ),
     },
@@ -82,7 +86,6 @@ function AppContent({
   return (
     <>
       <RouterProvider router={router} />
-      <KeyboardListener mediaPlayer={mediaPlayer} />
       <Toaster />
     </>
   );
@@ -91,12 +94,7 @@ function AppContent({
 function Main() {
   const mediaPlayer = useMediaPlayer();
 
-  return (
-    <SidebarProvider>
-      <AppContent mediaPlayer={mediaPlayer} />
-      <JazzInspector />
-    </SidebarProvider>
-  );
+  return <AppContent mediaPlayer={mediaPlayer} />;
 }
 
 const peer =
@@ -117,7 +115,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       onAnonymousAccountDiscarded={onAnonymousAccountDiscarded}
     >
       <SidebarProvider>
-        <Main />
+        <ErrorBoundary>
+          <Main />
+        </ErrorBoundary>
         <JazzInspector />
       </SidebarProvider>
     </JazzReactProvider>

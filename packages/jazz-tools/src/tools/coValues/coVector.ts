@@ -20,6 +20,7 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreCoVectorSchema,
 } from "../internal.js";
 
 /**
@@ -44,6 +45,8 @@ export class CoVector
   protected static requiredDimensionsCount: number | undefined = undefined;
   private declare _isVectorLoaded: boolean;
   private declare _requiredDimensionsCount: number;
+
+  static coValueSchema?: CoreCoVectorSchema;
 
   constructor(
     options:
@@ -74,17 +77,28 @@ export class CoVector
       : options.owner.$jazz.raw.createBinaryStream();
 
     Object.defineProperties(this, {
-      [TypeSym]: { value: "BinaryCoStream", enumerable: false },
+      [TypeSym]: {
+        value: "BinaryCoStream",
+        enumerable: false,
+        configurable: true,
+      },
       $jazz: {
         value: new CoVectorJazzApi(this, raw),
         enumerable: false,
+        configurable: true,
       },
-      $isLoaded: { value: true, enumerable: false },
-      _isVectorLoaded: { value: false, enumerable: false, writable: true },
+      $isLoaded: { value: true, enumerable: false, configurable: true },
+      _isVectorLoaded: {
+        value: false,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      },
       _requiredDimensionsCount: {
         value: dimensionsCount,
         enumerable: false,
         writable: false,
+        configurable: true,
       },
     });
 

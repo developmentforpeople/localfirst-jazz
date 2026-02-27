@@ -40,6 +40,24 @@ export const migrations: Record<number, string[]> = {
     );`,
     "CREATE INDEX IF NOT EXISTS idx_unsynced_covalues_co_value_id ON unsynced_covalues(co_value_id);",
   ],
+  5: [
+    `CREATE TABLE IF NOT EXISTS deletedCoValues (
+      coValueID TEXT PRIMARY KEY,
+      status INTEGER NOT NULL DEFAULT 0
+    ) WITHOUT ROWID;`,
+    "CREATE INDEX IF NOT EXISTS deletedCoValuesByStatus ON deletedCoValues (status);",
+  ],
+  6: [
+    `CREATE TABLE IF NOT EXISTS storageReconciliationLocks (
+      key TEXT PRIMARY KEY,
+      holderSessionId TEXT NOT NULL,
+      acquiredAt INTEGER NOT NULL,
+      expiresAt INTEGER NOT NULL,
+      lastProcessedOffset INTEGER NOT NULL DEFAULT 0,
+      releasedAt INTEGER
+    ) WITHOUT ROWID;`,
+  ],
+  7: ["ALTER TABLE storageReconciliationLocks DROP COLUMN expiresAt;"],
 };
 
 type Migration = {

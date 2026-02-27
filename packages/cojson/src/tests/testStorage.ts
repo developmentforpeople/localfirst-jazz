@@ -4,14 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database, { type Database as DatabaseT } from "libsql";
 import { onTestFinished } from "vitest";
-import { RawCoID, StorageAPI } from "../exports";
+import { RawCoID, SessionID, StorageAPI } from "../exports";
 import { SQLiteDatabaseDriver } from "../storage";
 import { getSqliteStorage } from "../storage/sqlite";
 import {
   SQLiteDatabaseDriverAsync,
   getSqliteStorageAsync,
 } from "../storage/sqliteAsync";
-import { SyncMessagesLog, SyncTestMessage } from "./testUtils";
+import { SyncMessagesLog } from "./testUtils";
+import { knownStateFromContent } from "../coValueContentMessage";
 
 class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
   private readonly db: DatabaseT;
@@ -36,14 +37,15 @@ class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
     return this.db.prepare(sql).get(params) as T | undefined;
   }
 
-  async transaction(callback: () => unknown) {
+  async transaction(callback: (tx: LibSQLSqliteAsyncDriver) => unknown) {
     await this.run("BEGIN TRANSACTION", []);
 
     try {
-      await callback();
+      await callback(this);
       await this.run("COMMIT", []);
     } catch (error) {
       await this.run("ROLLBACK", []);
+      throw error;
     }
   }
 
@@ -91,6 +93,41 @@ class LibSQLSqliteSyncDriver implements SQLiteDatabaseDriver {
   }
 }
 
+/** Cleanup functions registered by createAsyncStorage/createSyncStorage; run by the runner hook (registered first so it runs last). */
+const storageCleanupFns: Array<() => void | Promise<void>> = [];
+
+function registerStorageCleanup(fn: () => void | Promise<void>): void {
+  storageCleanupFns.push(fn);
+}
+
+/** Call from beforeEach so this hook is registered first and thus runs last (LIFO), after node shutdown hooks. */
+export function registerStorageCleanupRunner(): void {
+  // Clear cleanup functions from previous test
+  storageCleanupFns.length = 0;
+  onTestFinished(async () => {
+    for (const fn of storageCleanupFns) {
+      await fn();
+    }
+  });
+}
+
+function unlinkIfExists(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    if (err?.code !== "ENOENT") {
+      console.error(error);
+    }
+  }
+}
+
+function deleteDb(dbPath: string): void {
+  unlinkIfExists(dbPath);
+  unlinkIfExists(`${dbPath}-wal`);
+  unlinkIfExists(`${dbPath}-shm`);
+}
+
 export async function createAsyncStorage({
   filename,
   nodeName = "client",
@@ -100,12 +137,15 @@ export async function createAsyncStorage({
   nodeName: string;
   storageName: string;
 }) {
+  const dbPath = getDbPath(filename);
+
   const storage = await getSqliteStorageAsync(
-    new LibSQLSqliteAsyncDriver(getDbPath(filename)),
+    new LibSQLSqliteAsyncDriver(dbPath),
   );
 
-  onTestFinished(async () => {
+  registerStorageCleanup(async () => {
     await storage.close();
+    deleteDb(dbPath);
   });
 
   trackStorageMessages(storage, nodeName, storageName);
@@ -122,25 +162,50 @@ export function createSyncStorage({
   nodeName: string;
   storageName: string;
 }) {
+  const dbPath = getDbPath(filename);
+
   const storage = getSqliteStorage(
     new LibSQLSqliteSyncDriver(getDbPath(filename)),
   );
+
+  registerStorageCleanup(() => {
+    storage.close();
+    deleteDb(dbPath);
+  });
 
   trackStorageMessages(storage, nodeName, storageName);
 
   return storage;
 }
 
+export async function getAllCoValuesWaitingForDelete(
+  storage: StorageAPI,
+): Promise<RawCoID[]> {
+  // @ts-expect-error - dbClient is private
+  return storage.dbClient.getAllCoValuesWaitingForDelete();
+}
+
+export async function getCoValueStoredSessions(
+  storage: StorageAPI,
+  id: RawCoID,
+): Promise<SessionID[]> {
+  return new Promise<SessionID[]>((resolve) => {
+    storage.load(
+      id,
+      (content) => {
+        if (content.id === id) {
+          resolve(
+            Object.keys(knownStateFromContent(content).sessions) as SessionID[],
+          );
+        }
+      },
+      () => {},
+    );
+  });
+}
+
 export function getDbPath(defaultDbPath?: string) {
-  const dbPath = defaultDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
-
-  if (!defaultDbPath) {
-    onTestFinished(() => {
-      unlinkSync(dbPath);
-    });
-  }
-
-  return dbPath;
+  return defaultDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
 }
 
 function trackStorageMessages(

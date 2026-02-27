@@ -143,13 +143,11 @@ export class SyncStateManager {
   ) {
     const entry = this.syncManager.local.getCoValue(id);
 
-    if (!entry.hasVerifiedContent()) {
+    const knownState = entry.knownState();
+
+    if (!knownState.header) {
       return false;
     }
-
-    // Accessing verified knownState to skip the immutability
-    // applied on CoValueCore
-    const knownState = entry.verified.knownState();
 
     return areCurrentSessionsInSyncWith(
       knownState.sessions,

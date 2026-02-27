@@ -11,6 +11,7 @@ import {
   Resolved,
   SchemaUnion,
   SchemaUnionConcreteSubclass,
+  SubscribeCallback,
   SubscribeListenerOptions,
   coOptionalDefiner,
 } from "../../../internal.js";
@@ -18,6 +19,7 @@ import { z } from "../zodReExport.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 import { withSchemaResolveQuery } from "../../schemaUtils.js";
+import { extractPlainSchema } from "./schemaValidators.js";
 
 export interface DiscriminableCoValueSchemaDefinition {
   discriminatorMap: z.core.$ZodDiscriminatedUnionInternals["propValues"];
@@ -53,6 +55,26 @@ export class CoDiscriminatedUnionSchema<
   readonly collaborative = true as const;
   readonly builtin = "CoDiscriminatedUnion" as const;
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
+
+  #validationSchema: z.ZodType | undefined = undefined;
+
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const { discriminator, options } = this.getDefinition();
+    this.#validationSchema = z.discriminatedUnion(
+      discriminator,
+      // @ts-expect-error
+      options.map((schema) => {
+        const validationSchema = schema.getValidationSchema();
+        return extractPlainSchema(validationSchema);
+      }),
+    );
+
+    return this.#validationSchema;
+  };
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -108,23 +130,70 @@ export class CoDiscriminatedUnionSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
+    listener: SubscribeCallback<
+      Resolved<
+        CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
+        R
+      >
+    >,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion
+      // @ts-expect-error
+    > = DefaultResolveQuery,
+  >(
+    id: string,
     options: SubscribeListenerOptions<
       CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
       R
     >,
-    listener: (
-      value: Resolved<
+    listener: SubscribeCallback<
+      Resolved<
         CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
         R
-      >,
-      unsubscribe: () => void,
-    ) => void,
+      >
+    >,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion
+    >,
+  >(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<
+          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
+            SchemaUnion,
+          R
+        >
+      | SubscribeCallback<
+          Resolved<
+            CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
+              SchemaUnion,
+            R
+          >
+        >,
+    maybeListener?: SubscribeCallback<
+      Resolved<
+        CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
+        R
+      >
+    >,
   ): () => void {
+    if (typeof optionsOrListener === "function") {
+      // @ts-expect-error
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        optionsOrListener,
+      );
+    }
     // @ts-expect-error
     return this.coValueClass.subscribe(
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      maybeListener,
     );
   }
 
@@ -176,6 +245,7 @@ export function createCoreCoDiscriminatedUnionSchema<
   return {
     collaborative: true as const,
     builtin: "CoDiscriminatedUnion" as const,
+    getValidationSchema: () => z.any(),
     getDefinition: () => ({
       discriminator,
       get discriminatorMap() {

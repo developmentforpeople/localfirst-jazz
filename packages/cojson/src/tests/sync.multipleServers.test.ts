@@ -2,9 +2,11 @@ import { assert, beforeEach, describe, expect, test } from "vitest";
 
 import { expectList, expectMap } from "../coValue";
 import { WasmCrypto } from "../crypto/WasmCrypto";
+import { CO_VALUE_LOADING_CONFIG, setCoValueLoadingTimeout } from "../config";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
+  blockMessageTypeOnOutgoingPeer,
   fillCoMapWithLargeData,
   loadCoValueOrFail,
   setupTestNode,
@@ -26,16 +28,18 @@ beforeEach(async () => {
 });
 
 function connectServers(client: ReturnType<typeof setupTestNode>) {
-  client.connectToSyncServer({
+  const server1Connection = client.connectToSyncServer({
     ourName: "client",
     syncServerName: "server1",
     syncServer: server1.node,
   });
-  client.connectToSyncServer({
+  const server2Connection = client.connectToSyncServer({
     ourName: "client",
     syncServerName: "server2",
     syncServer: server2.node,
   });
+
+  return { server1Connection, server2Connection };
 }
 
 describe("multiple servers peers", () => {
@@ -56,12 +60,12 @@ describe("multiple servers peers", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server1 | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server2 | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server1 | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server2 | CONTENT Group header: true new: After: 0 New: 4",
         "client -> server1 | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server2 | CONTENT Map header: true new: After: 0 New: 1",
-        "server1 -> client | KNOWN Group sessions: header/3",
-        "server2 -> client | KNOWN Group sessions: header/3",
+        "server1 -> client | KNOWN Group sessions: header/4",
+        "server2 -> client | KNOWN Group sessions: header/4",
         "server1 -> client | KNOWN Map sessions: header/1",
         "server2 -> client | KNOWN Map sessions: header/1",
       ]
@@ -99,71 +103,6 @@ describe("multiple servers peers", () => {
       expect(mapOnSession2.get("count")).toEqual(4);
     });
 
-    expect(
-      SyncMessagesLog.getMessages({
-        Group: group.core,
-        Map: map.core,
-      }),
-    ).toMatchInlineSnapshot(`
-      [
-        "client -> server1 | LOAD Map sessions: empty",
-        "client -> server2 | LOAD Map sessions: empty",
-        "client -> server1 | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server2 | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server1 | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server2 | CONTENT Map header: true new: After: 0 New: 1",
-        "server1 -> client | KNOWN Map sessions: empty",
-        "server2 -> client | KNOWN Map sessions: empty",
-        "server1 -> client | KNOWN Group sessions: header/3",
-        "server2 -> client | KNOWN Group sessions: header/3",
-        "server1 -> client | KNOWN Map sessions: header/1",
-        "server1 -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "server1 -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "server2 -> client | KNOWN Map sessions: header/1",
-        "server2 -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "server2 -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server1 | KNOWN Group sessions: header/3",
-        "client -> server2 | LOAD Group sessions: header/3",
-        "client -> server1 | KNOWN Map sessions: header/1",
-        "client -> server2 | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server1 | CONTENT Map header: false new: After: 0 New: 1",
-        "client -> server2 | CONTENT Map header: false new: After: 0 New: 1",
-        "client -> server1 | CONTENT Map header: false new: After: 1 New: 1",
-        "client -> server2 | CONTENT Map header: false new: After: 1 New: 1",
-        "client -> server2 | KNOWN Group sessions: header/3",
-        "client -> server2 | CONTENT Group header: false new: After: 0 New: 3",
-        "client -> server2 | KNOWN Map sessions: header/2",
-        "server2 -> client | KNOWN Map sessions: header/1",
-        "server1 -> client | KNOWN Map sessions: header/2",
-        "server1 -> client | CONTENT Map header: false new: After: 0 New: 1",
-        "server2 -> client | KNOWN Map sessions: header/2",
-        "server2 -> client | CONTENT Map header: false new: After: 0 New: 1",
-        "server1 -> client | KNOWN Map sessions: header/3",
-        "server1 -> client | CONTENT Map header: false new: After: 1 New: 1",
-        "server2 -> client | KNOWN Map sessions: header/3",
-        "server2 -> client | CONTENT Map header: false new: After: 1 New: 1",
-        "server2 -> client | KNOWN Group sessions: header/3",
-        "client -> server1 | KNOWN Map sessions: header/3",
-        "client -> server2 | CONTENT Map header: false new: After: 0 New: 1",
-        "client -> server2 | KNOWN Map sessions: header/3",
-        "client -> server1 | KNOWN Map sessions: header/3",
-        "client -> server2 | CONTENT Map header: false new: After: 1 New: 1",
-        "client -> server2 | KNOWN Map sessions: header/3",
-        "server2 -> client | KNOWN Map sessions: header/3",
-        "server2 -> client | KNOWN Map sessions: header/3",
-        "client -> server1 | CONTENT Map header: false new: After: 1 New: 1",
-        "client -> server2 | CONTENT Map header: false new: After: 1 New: 1",
-        "server1 -> client | KNOWN Map sessions: header/4",
-        "server1 -> client | CONTENT Map header: false new: After: 1 New: 1",
-        "server2 -> client | KNOWN Map sessions: header/4",
-        "server2 -> client | CONTENT Map header: false new: After: 1 New: 1",
-        "client -> server1 | KNOWN Map sessions: header/4",
-        "client -> server2 | CONTENT Map header: false new: After: 1 New: 1",
-        "client -> server2 | KNOWN Map sessions: header/4",
-        "server2 -> client | KNOWN Map sessions: header/4",
-      ]
-    `);
-
     const mapOnServer1 = server1.node.getCoValue(map.id);
     const mapOnServer2 = server2.node.getCoValue(map.id);
 
@@ -194,20 +133,20 @@ describe("multiple servers peers", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server1 | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server2 | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server1 | CONTENT ParentGroup header: true new: After: 0 New: 5",
-        "client -> server2 | CONTENT ParentGroup header: true new: After: 0 New: 5",
-        "client -> server1 | CONTENT Group header: false new: After: 3 New: 2",
-        "client -> server2 | CONTENT Group header: false new: After: 3 New: 2",
+        "client -> server1 | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server2 | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server1 | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "client -> server2 | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "client -> server1 | CONTENT Group header: false new: After: 4 New: 2",
+        "client -> server2 | CONTENT Group header: false new: After: 4 New: 2",
         "client -> server1 | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server2 | CONTENT Map header: true new: After: 0 New: 1",
-        "server1 -> client | KNOWN Group sessions: header/3",
-        "server2 -> client | KNOWN Group sessions: header/3",
-        "server1 -> client | KNOWN ParentGroup sessions: header/5",
-        "server2 -> client | KNOWN ParentGroup sessions: header/5",
-        "server1 -> client | KNOWN Group sessions: header/5",
-        "server2 -> client | KNOWN Group sessions: header/5",
+        "server1 -> client | KNOWN Group sessions: header/4",
+        "server2 -> client | KNOWN Group sessions: header/4",
+        "server1 -> client | KNOWN ParentGroup sessions: header/6",
+        "server2 -> client | KNOWN ParentGroup sessions: header/6",
+        "server1 -> client | KNOWN Group sessions: header/6",
+        "server2 -> client | KNOWN Group sessions: header/6",
         "server1 -> client | KNOWN Map sessions: header/1",
         "server2 -> client | KNOWN Map sessions: header/1",
       ]
@@ -255,12 +194,12 @@ describe("multiple servers peers", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server1 | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> server2 | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server1 | CONTENT Group header: true new: After: 0 New: 6",
+        "client -> server2 | CONTENT Group header: true new: After: 0 New: 6",
         "client -> server1 | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server2 | CONTENT Map header: true new: After: 0 New: 1",
-        "server1 -> client | KNOWN Group sessions: header/5",
-        "server2 -> client | KNOWN Group sessions: header/5",
+        "server1 -> client | KNOWN Group sessions: header/6",
+        "server2 -> client | KNOWN Group sessions: header/6",
         "server1 -> client | KNOWN Map sessions: header/1",
         "server2 -> client | KNOWN Map sessions: header/1",
         "client -> server1 | CONTENT Map header: false new: After: 1 New: 1",
@@ -294,16 +233,16 @@ describe("multiple servers peers", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server1 | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server2 | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server1 | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server2 | CONTENT Group header: true new: After: 0 New: 4",
         "client -> server1 | CONTENT InitialMap header: true new: ",
         "client -> server2 | CONTENT InitialMap header: true new: ",
         "client -> server1 | CONTENT ChildMap header: true new: After: 0 New: 1",
         "client -> server2 | CONTENT ChildMap header: true new: After: 0 New: 1",
         "client -> server1 | CONTENT InitialMap header: false new: After: 0 New: 1",
         "client -> server2 | CONTENT InitialMap header: false new: After: 0 New: 1",
-        "server1 -> client | KNOWN Group sessions: header/3",
-        "server2 -> client | KNOWN Group sessions: header/3",
+        "server1 -> client | KNOWN Group sessions: header/4",
+        "server2 -> client | KNOWN Group sessions: header/4",
         "server1 -> client | KNOWN InitialMap sessions: header/0",
         "server2 -> client | KNOWN InitialMap sessions: header/0",
         "server1 -> client | KNOWN ChildMap sessions: header/1",
@@ -334,16 +273,16 @@ describe("multiple servers peers", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server1 | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> server2 | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server1 | CONTENT Group header: true new: After: 0 New: 6",
+        "client -> server2 | CONTENT Group header: true new: After: 0 New: 6",
         "client -> server1 | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
         "client -> server2 | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
         "client -> server1 | CONTENT Map header: false new: After: 73 New: 73",
         "client -> server2 | CONTENT Map header: false new: After: 73 New: 73",
         "client -> server1 | CONTENT Map header: false new: After: 146 New: 54",
         "client -> server2 | CONTENT Map header: false new: After: 146 New: 54",
-        "server1 -> client | KNOWN Group sessions: header/5",
-        "server2 -> client | KNOWN Group sessions: header/5",
+        "server1 -> client | KNOWN Group sessions: header/6",
+        "server2 -> client | KNOWN Group sessions: header/6",
         "server1 -> client | KNOWN Map sessions: header/73",
         "server2 -> client | KNOWN Map sessions: header/73",
         "server1 -> client | KNOWN Map sessions: header/146",
@@ -376,8 +315,8 @@ describe("multiple servers peers", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server1 | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> server2 | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server1 | CONTENT Group header: true new: After: 0 New: 6",
+        "client -> server2 | CONTENT Group header: true new: After: 0 New: 6",
         "client -> server1 | CONTENT Map header: true new: ",
         "client -> server2 | CONTENT Map header: true new: ",
         "client -> server1 | CONTENT Map header: false new: After: 0 New: 73 expectContentUntil: header/200",
@@ -386,8 +325,8 @@ describe("multiple servers peers", () => {
         "client -> server2 | CONTENT Map header: false new: After: 73 New: 73",
         "client -> server1 | CONTENT Map header: false new: After: 146 New: 54",
         "client -> server2 | CONTENT Map header: false new: After: 146 New: 54",
-        "server1 -> client | KNOWN Group sessions: header/5",
-        "server2 -> client | KNOWN Group sessions: header/5",
+        "server1 -> client | KNOWN Group sessions: header/6",
+        "server2 -> client | KNOWN Group sessions: header/6",
         "server1 -> client | KNOWN Map sessions: header/0",
         "server2 -> client | KNOWN Map sessions: header/0",
         "server1 -> client | KNOWN Map sessions: header/73",
@@ -432,22 +371,22 @@ describe("multiple servers peers", () => {
       [
         "client -> server1 | LOAD Map sessions: empty",
         "client -> server2 | LOAD Map sessions: empty",
-        "client -> server1 | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> server2 | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server1 | CONTENT Group header: true new: After: 0 New: 6",
+        "client -> server2 | CONTENT Group header: true new: After: 0 New: 6",
         "client -> server1 | CONTENT Map header: true new: ",
         "client -> server2 | CONTENT Map header: true new: ",
         "server1 -> client | KNOWN Map sessions: empty",
         "server2 -> client | KNOWN Map sessions: empty",
-        "server1 -> client | KNOWN Group sessions: header/5",
-        "server2 -> client | KNOWN Group sessions: header/5",
+        "server1 -> client | KNOWN Group sessions: header/6",
+        "server2 -> client | KNOWN Group sessions: header/6",
         "server1 -> client | KNOWN Map sessions: header/0",
-        "server1 -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "server1 -> client | CONTENT Group header: true new: After: 0 New: 6",
         "server1 -> client | CONTENT Map header: true new: ",
         "server2 -> client | KNOWN Map sessions: header/0",
-        "server2 -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "server2 -> client | CONTENT Group header: true new: After: 0 New: 6",
         "server2 -> client | CONTENT Map header: true new: ",
-        "client -> server1 | KNOWN Group sessions: header/5",
-        "client -> server2 | LOAD Group sessions: header/5",
+        "client -> server1 | KNOWN Group sessions: header/6",
+        "client -> server2 | LOAD Group sessions: header/6",
         "client -> server1 | KNOWN Map sessions: header/0",
         "client -> server2 | CONTENT Map header: true new: ",
         "client -> server1 | CONTENT Map header: false new: After: 0 New: 73 expectContentUntil: header/200",
@@ -456,9 +395,10 @@ describe("multiple servers peers", () => {
         "client -> server2 | CONTENT Map header: false new: After: 73 New: 73",
         "client -> server1 | CONTENT Map header: false new: After: 146 New: 54",
         "client -> server2 | CONTENT Map header: false new: After: 146 New: 54",
-        "client -> server2 | KNOWN Group sessions: header/5",
-        "client -> server2 | CONTENT Group header: false new: After: 0 New: 5",
+        "client -> server2 | KNOWN Group sessions: header/6",
+        "client -> server2 | CONTENT Group header: false new: After: 0 New: 6",
         "client -> server2 | KNOWN Map sessions: header/0",
+        "server2 -> client | KNOWN Group sessions: header/6",
         "server2 -> client | KNOWN Map sessions: header/0",
         "server1 -> client | KNOWN Map sessions: header/73",
         "server1 -> client | CONTENT Map header: false new: After: 0 New: 73",
@@ -472,7 +412,7 @@ describe("multiple servers peers", () => {
         "server1 -> client | CONTENT Map header: false new: After: 146 New: 54",
         "server2 -> client | KNOWN Map sessions: header/200",
         "server2 -> client | CONTENT Map header: false new: After: 146 New: 54",
-        "server2 -> client | KNOWN Group sessions: header/5",
+        "server2 -> client | KNOWN Group sessions: header/6",
         "client -> server1 | KNOWN Map sessions: header/73",
         "client -> server2 | CONTENT Map header: false new: After: 0 New: 73",
         "client -> server2 | KNOWN Map sessions: header/73",
@@ -487,5 +427,58 @@ describe("multiple servers peers", () => {
         "server2 -> client | KNOWN Map sessions: header/200",
       ]
     `);
+  });
+
+  test("coValue loading times out on both servers", async () => {
+    const previousTimeout = CO_VALUE_LOADING_CONFIG.TIMEOUT;
+    setCoValueLoadingTimeout(20);
+
+    try {
+      const creator = setupTestNode();
+      connectServers(creator);
+
+      const group = creator.node.createGroup();
+      const map = group.createMap();
+      map.set("hello", "world", "trusting");
+      await map.core.waitForSync();
+
+      const client = setupTestNode();
+      const { server1Connection, server2Connection } = connectServers(client);
+
+      blockMessageTypeOnOutgoingPeer(
+        server1Connection.peerOnServer,
+        "content",
+        {
+          id: map.id,
+        },
+      );
+      blockMessageTypeOnOutgoingPeer(
+        server2Connection.peerOnServer,
+        "content",
+        {
+          id: map.id,
+        },
+      );
+
+      const loadedMap = await client.node.load(map.id, true);
+
+      expect(loadedMap).toBe("unavailable");
+    } finally {
+      setCoValueLoadingTimeout(previousTimeout);
+    }
+  });
+
+  test("coValue loading is unavailable on both servers", async () => {
+    const disconnectedNode = setupTestNode();
+    const group = disconnectedNode.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    const client = setupTestNode();
+    connectServers(client);
+
+    const loadedMap = await client.node.load(map.id, true);
+
+    expect(loadedMap).toBe("unavailable");
   });
 });

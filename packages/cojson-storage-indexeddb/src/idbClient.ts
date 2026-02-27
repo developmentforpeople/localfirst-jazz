@@ -9,10 +9,13 @@ import type {
   DBClientInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
+  StorageReconciliationLockRow,
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
+  StorageReconciliationAcquireResult,
 } from "cojson";
+import { cojsonInternals } from "cojson";
 import {
   CoJsonIDBTransaction,
   putIndexedDbStore,
@@ -20,6 +23,17 @@ import {
   StoreName,
 } from "./CoJsonIDBTransaction.js";
 
+type DeletedCoValueQueueEntry = {
+  coValueID: RawCoID;
+  status?: "pending" | "done";
+};
+
+/**
+ * Contains operations that should run as part of a readwrite transaction.
+ *
+ * Everything in this class is meant to be executed sequentially and never
+ * concurrently, across all the data stores and tabs.
+ */
 export class IDBTransaction implements DBTransactionInterfaceAsync {
   constructor(private tx: CoJsonIDBTransaction) {}
 
@@ -39,6 +53,70 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
         .index("uniqueSessions")
         .get([coValueRowId, sessionID]),
     );
+  }
+
+  async markCoValueAsDeleted(id: RawCoID): Promise<void> {
+    await this.run((tx) =>
+      tx.getObjectStore("deletedCoValues").put({
+        coValueID: id,
+        status: "pending",
+      } satisfies DeletedCoValueQueueEntry),
+    );
+  }
+
+  async deleteCoValueContent(coValue: StoredCoValueRow): Promise<void> {
+    const coValueRowID = coValue.rowID;
+
+    const sessions = await this.run((tx) =>
+      tx
+        .getObjectStore("sessions")
+        .index("sessionsByCoValue")
+        .getAll(coValueRowID),
+    );
+
+    const sessionsToDelete = (
+      sessions as { rowID: number; sessionID: string }[]
+    )
+      .filter((s) => !s.sessionID.endsWith("$"))
+      .map((s) => s.rowID);
+
+    const ops: Promise<unknown>[] = [];
+
+    for (const sessionRowID of sessionsToDelete) {
+      ops.push(
+        this.#deleteAllBySesPrefix("transactions", sessionRowID),
+        this.#deleteAllBySesPrefix("signatureAfter", sessionRowID),
+        this.run((tx) => tx.getObjectStore("sessions").delete(sessionRowID)),
+      );
+    }
+
+    ops.push(
+      this.run((tx) =>
+        tx.getObjectStore("deletedCoValues").put({
+          coValueID: coValue.id,
+          status: "done",
+        } satisfies DeletedCoValueQueueEntry),
+      ),
+    );
+
+    await Promise.all(ops);
+  }
+
+  async #deleteAllBySesPrefix(
+    storeName: "transactions" | "signatureAfter",
+    sesRowID: number,
+  ) {
+    const range = IDBKeyRange.bound(
+      [sesRowID, 0],
+      [sesRowID, Number.POSITIVE_INFINITY],
+    );
+    const keys = await this.run((tx) =>
+      tx.getObjectStore(storeName).getAllKeys(range),
+    );
+
+    for (const key of keys as IDBValidKey[]) {
+      await this.run((tx) => tx.getObjectStore(storeName).delete(key));
+    }
   }
 
   async addSessionUpdate({
@@ -141,6 +219,22 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
   }): Promise<void> {
     await this.run((tx) => tx.getObjectStore("unsyncedCoValues").put(record));
   }
+
+  async getStorageReconciliationLock(
+    key: string,
+  ): Promise<StorageReconciliationLockRow | undefined> {
+    return this.run((tx) =>
+      tx.getObjectStore("storageReconciliationLocks").get(key),
+    );
+  }
+
+  async putStorageReconciliationLock(
+    entry: StorageReconciliationLockRow,
+  ): Promise<void> {
+    await this.run((tx) =>
+      tx.getObjectStore("storageReconciliationLocks").put(entry),
+    );
+  }
 }
 
 export class IDBClient implements DBClientInterfaceAsync {
@@ -209,8 +303,20 @@ export class IDBClient implements DBClientInterfaceAsync {
     }).catch(() => this.getCoValueRowID(id));
   }
 
+  async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
+    const entries = await queryIndexedDbStore<DeletedCoValueQueueEntry[]>(
+      this.db,
+      "deletedCoValues",
+      (store) =>
+        store.index("deletedCoValuesByStatus").getAll("pending") as IDBRequest<
+          DeletedCoValueQueueEntry[]
+        >,
+    );
+    return entries.map((e) => e.coValueID);
+  }
+
   async transaction(
-    operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
+    operationsCallback: (tx: IDBTransaction) => Promise<unknown>,
     storeNames?: StoreName[],
   ) {
     const tx = new CoJsonIDBTransaction(this.db, storeNames);
@@ -232,21 +338,20 @@ export class IDBClient implements DBClientInterfaceAsync {
 
     await this.transaction(
       async (tx) => {
-        const idbTx = tx as IDBTransaction;
         await Promise.all(
           updates.map(async (update) => {
-            const record = await idbTx.getUnsyncedCoValueRecord(
+            const record = await tx.getUnsyncedCoValueRecord(
               update.id,
               update.peerId,
             );
             if (update.synced) {
               // Delete
               if (record) {
-                await idbTx.deleteUnsyncedCoValueRecord(record.rowID);
+                await tx.deleteUnsyncedCoValueRecord(record.rowID);
               }
             } else {
               // Insert or update
-              await idbTx.putUnsyncedCoValueRecord(
+              await tx.putUnsyncedCoValueRecord(
                 record
                   ? {
                       rowID: record.rowID,
@@ -264,6 +369,35 @@ export class IDBClient implements DBClientInterfaceAsync {
       },
       ["unsyncedCoValues"],
     );
+  }
+
+  async eraseCoValueButKeepTombstone(coValueID: RawCoID): Promise<void> {
+    const coValue = await this.getCoValue(coValueID);
+
+    if (!coValue) {
+      console.warn(`CoValue ${coValueID} not found, skipping deletion`);
+      return;
+    }
+
+    await this.transaction((tx) => tx.deleteCoValueContent(coValue));
+  }
+
+  async getCoValueIDs(
+    limit: number,
+    offset: number,
+  ): Promise<{ id: RawCoID }[]> {
+    const rows = await queryIndexedDbStore<StoredCoValueRow[]>(
+      this.db,
+      "coValues",
+      (store) =>
+        // Include upper bound but not lower bound (offset starts at 0)
+        store.getAll(IDBKeyRange.bound(offset, offset + limit, true, false)),
+    );
+    return rows.map((row) => ({ id: row.id }));
+  }
+
+  async getCoValueCount(): Promise<number> {
+    return queryIndexedDbStore(this.db, "coValues", (store) => store.count());
   }
 
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
@@ -289,6 +423,94 @@ export class IDBClient implements DBClientInterfaceAsync {
         );
       },
       ["unsyncedCoValues"],
+    );
+  }
+
+  async tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: string,
+  ): Promise<StorageReconciliationAcquireResult> {
+    const lockKey = `lock#${peerId}`;
+    const now = Date.now();
+    const { LOCK_TTL_MS, RECONCILIATION_INTERVAL_MS } =
+      cojsonInternals.STORAGE_RECONCILIATION_CONFIG;
+
+    let result: StorageReconciliationAcquireResult;
+    await this.transaction(
+      async (tx) => {
+        const lock = await tx.getStorageReconciliationLock(lockKey);
+        if (
+          lock?.releasedAt &&
+          now - lock.releasedAt < RECONCILIATION_INTERVAL_MS
+        ) {
+          result = { acquired: false, reason: "not_due" };
+          return;
+        }
+        const expiresAt = lock ? lock.acquiredAt + LOCK_TTL_MS : 0;
+        const isLockHeldByOtherSession = lock?.holderSessionId !== sessionId;
+        if (
+          lock &&
+          !lock.releasedAt &&
+          expiresAt >= now &&
+          isLockHeldByOtherSession
+        ) {
+          result = { acquired: false, reason: "lock_held" };
+          return;
+        }
+        const lastProcessedOffset =
+          lock && !lock.releasedAt ? (lock.lastProcessedOffset ?? 0) : 0;
+        await tx.putStorageReconciliationLock({
+          key: lockKey,
+          holderSessionId: sessionId,
+          acquiredAt: now,
+          lastProcessedOffset,
+        });
+        result = { acquired: true, lastProcessedOffset };
+      },
+      ["storageReconciliationLocks"],
+    );
+    return result!;
+  }
+
+  async renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: string,
+    offset: number,
+  ): Promise<void> {
+    const lockKey = `lock#${peerId}`;
+    await this.transaction(
+      async (tx) => {
+        const lock = await tx.getStorageReconciliationLock(lockKey);
+        if (lock && lock.holderSessionId === sessionId && !lock.releasedAt) {
+          await tx.putStorageReconciliationLock({
+            ...lock,
+            lastProcessedOffset: offset,
+          });
+        }
+      },
+      ["storageReconciliationLocks"],
+    );
+  }
+
+  async releaseStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: string,
+  ): Promise<void> {
+    const lockKey = `lock#${peerId}`;
+    const releasedAt = Date.now();
+
+    await this.transaction(
+      async (tx) => {
+        const lock = await tx.getStorageReconciliationLock(lockKey);
+        if (lock?.holderSessionId === sessionId) {
+          await tx.putStorageReconciliationLock({
+            ...lock,
+            releasedAt,
+            lastProcessedOffset: 0,
+          });
+        }
+      },
+      ["storageReconciliationLocks"],
     );
   }
 

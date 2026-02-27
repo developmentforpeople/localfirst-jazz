@@ -11,6 +11,7 @@ import {
   RefsToResolveStrict,
   Resolved,
   Simplify,
+  SubscribeCallback,
   SubscribeListenerOptions,
   coMapDefiner,
   coOptionalDefiner,
@@ -18,6 +19,9 @@ import {
   isAnyCoValueSchema,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  isCoValueSchema,
+  type Schema,
+  CoValueCreateOptions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -32,6 +36,16 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import {
+  coValueValidationSchema,
+  generateValidationSchemaFromItem,
+} from "./schemaValidators.js";
+import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
+
+type CoMapSchemaInstance<Shape extends z.core.$ZodLooseShape> = Simplify<
+  CoMapInstanceCoValuesMaybeLoaded<Shape>
+> &
+  CoMap;
 
 export class CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
@@ -44,7 +58,44 @@ export class CoMapSchema<
   builtin = "CoMap" as const;
   shape: Shape;
   catchAll?: CatchAll;
+  #descriptorsSchema: CoMapDescriptorsSchema | undefined = undefined;
   getDefinition: () => CoMapSchemaDefinition;
+
+  #validationSchema: z.ZodType | undefined = undefined;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const plainShape: Record<string, z.ZodTypeAny> = {};
+
+    for (const key in this.shape) {
+      const item = this.shape[key];
+      if (isCoValueSchema(item)) {
+        // Inject as getter to avoid circularity issues
+        Object.defineProperty(plainShape, key, {
+          get: () => generateValidationSchemaFromItem(item),
+          enumerable: true,
+          configurable: true,
+        });
+      } else {
+        plainShape[key] = generateValidationSchemaFromItem(item);
+      }
+    }
+
+    let validationSchema = z.strictObject(plainShape);
+    if (this.catchAll) {
+      validationSchema = validationSchema.catchall(
+        generateValidationSchemaFromItem(
+          this.catchAll as unknown as AnyZodOrCoValueSchema,
+        ),
+      );
+    }
+
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoMap);
+
+    return this.#validationSchema;
+  };
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -53,11 +104,14 @@ export class CoMapSchema<
    */
   resolveQuery: DefaultResolveQuery = true as DefaultResolveQuery;
 
+  #permissions: SchemaPermissions | null = null;
   /**
    * Permissions to be used when creating or composing CoValues
    * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(
     coreSchema: CoreCoMapSchema<Shape, CatchAll>,
@@ -68,30 +122,45 @@ export class CoMapSchema<
     this.getDefinition = coreSchema.getDefinition;
   }
 
+  getDescriptorsSchema = (): CoMapDescriptorsSchema => {
+    if (this.#descriptorsSchema) {
+      return this.#descriptorsSchema;
+    }
+
+    const descriptorShape: Record<string, Schema> = {};
+    for (const key of Object.keys(this.shape)) {
+      const field = this.shape[key as keyof Shape];
+      descriptorShape[key] = resolveSchemaField(field as any);
+    }
+
+    const descriptorCatchall =
+      this.catchAll === undefined
+        ? undefined
+        : resolveSchemaField(this.catchAll as any);
+
+    this.#descriptorsSchema = {
+      shape: descriptorShape,
+      catchall: descriptorCatchall,
+    };
+
+    return this.#descriptorsSchema;
+  };
+
   create(
     init: CoMapSchemaInit<Shape>,
-    options?:
-      | {
-          owner?: Group;
-          unique?: CoValueUniqueness["uniqueness"];
-        }
-      | Group,
+    options?: CoValueCreateOptions,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoMapSchemaInit<Shape>,
-    options?:
-      | {
-          owner?: Owner;
-          unique?: CoValueUniqueness["uniqueness"];
-        }
-      | Owner,
+    options?: CoValueCreateOptions<{}, Account | Group>,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
   create(init: any, options?: any) {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
     );
+
     return this.coValueClass.create(init, optionsWithPermissions);
   }
 
@@ -150,32 +219,47 @@ export class CoMapSchema<
 
   subscribe<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      CoMapSchemaInstance<Shape>
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     > = DefaultResolveQuery,
   >(
     id: string,
-    options: SubscribeListenerOptions<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-      R
-    >,
-    listener: (
-      value: Resolved<
-        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-        R
-      >,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      CoMapSchemaInstance<Shape>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(
+    id: string,
+    options: SubscribeListenerOptions<CoMapSchemaInstance<Shape>, R>,
+    listener: SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
+  ): () => void;
+  subscribe<const R extends RefsToResolve<CoMapSchemaInstance<Shape>>>(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<CoMapSchemaInstance<Shape>, R>
+      | SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
+    maybeListener?: SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
   ): () => void {
+    if (typeof optionsOrListener === "function") {
+      // @ts-expect-error
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        optionsOrListener,
+      );
+    }
     // @ts-expect-error
     return this.coValueClass.subscribe(
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      maybeListener,
     );
   }
 
-  /** @deprecated Use `CoMap.upsertUnique` and `CoMap.loadUnique` instead. */
+  /** @deprecated Use `loadUnique` instead. */
   findUnique(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: string,
@@ -184,6 +268,54 @@ export class CoMapSchema<
     return this.coValueClass.findUnique(unique, ownerID, as);
   }
 
+  /**
+   * Get an existing unique CoMap or create a new one if it doesn't exist.
+   *
+   * Unlike `upsertUnique`, this method does NOT update existing values with the provided value.
+   * The provided value is only used when creating a new CoMap.
+   *
+   * @example
+   * ```ts
+   * const settings = await UserSettings.getOrCreateUnique({
+   *   value: { theme: "dark", language: "en" },
+   *   unique: "user-settings",
+   *   owner: me,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoMap.
+   * @returns Either an existing CoMap (unchanged), or a new initialised CoMap if none exists.
+   * @category Subscription & Loading
+   */
+  getOrCreateUnique<
+    const R extends RefsToResolve<
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(options: {
+    value: Simplify<CoMapSchemaInit<Shape>>;
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Owner;
+    resolve?: RefsToResolveStrict<
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
+      R
+    >;
+  }): Promise<
+    Settled<
+      Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+    >
+  > {
+    // @ts-expect-error
+    return this.coValueClass.getOrCreateUnique(
+      // @ts-expect-error
+      withSchemaResolveQuery(options, this.resolveQuery),
+    );
+  }
+
+  /**
+   * @deprecated Use `getOrCreateUnique` instead. Note: getOrCreateUnique does not update existing values.
+   * If you need to update, use getOrCreateUnique followed by direct property assignment.
+   */
   upsertUnique<
     const R extends RefsToResolve<
       Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
@@ -362,7 +494,7 @@ export class CoMapSchema<
    * Configure permissions to be used when creating or composing CoValues
    */
   withPermissions(
-    permissions: SchemaPermissions,
+    permissions: Omit<SchemaPermissions, "writer">,
   ): CoMapSchema<Shape, CatchAll, Owner, DefaultResolveQuery> {
     return this.copy({ permissions });
   }
@@ -385,7 +517,7 @@ export class CoMapSchema<
     copy.coValueClass.prototype.migrate = this.coValueClass.prototype.migrate;
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
-    copy.permissions = permissions ?? this.permissions;
+    copy.#permissions = permissions ?? this.#permissions;
     return copy;
   }
 }
@@ -394,11 +526,36 @@ export function createCoreCoMapSchema<
   Shape extends z.core.$ZodLooseShape,
   CatchAll extends AnyZodOrCoValueSchema | unknown = unknown,
 >(shape: Shape, catchAll?: CatchAll): CoreCoMapSchema<Shape, CatchAll> {
+  let descriptorsSchema: CoMapDescriptorsSchema | undefined;
+
   return {
     collaborative: true as const,
     builtin: "CoMap" as const,
     shape,
     catchAll,
+    getDescriptorsSchema: () => {
+      if (descriptorsSchema) {
+        return descriptorsSchema;
+      }
+
+      const descriptorShape: Record<string, Schema> = {};
+      for (const key of Object.keys(shape)) {
+        const field = shape[key as keyof Shape];
+        descriptorShape[key] = resolveSchemaField(field as any);
+      }
+
+      const descriptorCatchall =
+        catchAll === undefined
+          ? undefined
+          : resolveSchemaField(catchAll as any);
+
+      descriptorsSchema = {
+        shape: descriptorShape,
+        catchall: descriptorCatchall,
+      };
+
+      return descriptorsSchema;
+    },
     getDefinition: () => ({
       get shape() {
         return shape;
@@ -425,6 +582,7 @@ export function createCoreCoMapSchema<
       },
     }),
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -436,6 +594,11 @@ export interface CoMapSchemaDefinition<
   catchall?: CatchAll;
 }
 
+export type CoMapDescriptorsSchema = {
+  shape: Record<string, Schema>;
+  catchall?: Schema;
+};
+
 // less precise version to avoid circularity issues and allow matching against
 export interface CoreCoMapSchema<
   Shape extends z.core.$ZodLooseShape = z.core.$ZodLooseShape,
@@ -444,6 +607,7 @@ export interface CoreCoMapSchema<
   builtin: "CoMap";
   shape: Shape;
   catchAll?: CatchAll;
+  getDescriptorsSchema: () => CoMapDescriptorsSchema;
   getDefinition: () => CoMapSchemaDefinition;
 }
 

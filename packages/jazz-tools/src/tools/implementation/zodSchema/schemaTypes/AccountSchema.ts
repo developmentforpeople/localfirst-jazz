@@ -1,6 +1,5 @@
 import {
   Account,
-  AccountCreationProps,
   BranchDefinition,
   CoMapSchemaDefinition,
   coOptionalDefiner,
@@ -10,16 +9,17 @@ import {
   RefsToResolve,
   Resolved,
   Simplify,
+  SubscribeCallback,
   SubscribeListenerOptions,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema, Loaded, ResolveQuery } from "../zodSchema.js";
 import {
   CoMapSchema,
+  CoMapDescriptorsSchema,
   CoreCoMapSchema,
   createCoreCoMapSchema,
 } from "./CoMapSchema.js";
@@ -52,7 +52,25 @@ export class AccountSchema<
   collaborative = true as const;
   builtin = "Account" as const;
   shape: Shape;
+  getDescriptorsSchema: () => CoMapDescriptorsSchema;
   getDefinition: () => CoMapSchemaDefinition;
+
+  #validationSchema: z.ZodType | undefined = undefined;
+
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z.instanceof(Account).or(
+      z.object({
+        profile: this.shape.profile.getValidationSchema(),
+        root: z.optional(this.shape.root.getValidationSchema()),
+      }),
+    );
+
+    return this.#validationSchema;
+  };
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -66,6 +84,7 @@ export class AccountSchema<
     private coValueClass: typeof Account,
   ) {
     this.shape = coreSchema.shape;
+    this.getDescriptorsSchema = coreSchema.getDescriptorsSchema;
     this.getDefinition = coreSchema.getDefinition;
   }
 
@@ -168,17 +187,40 @@ export class AccountSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
+    listener: SubscribeCallback<Resolved<Simplify<AccountInstance<Shape>>, R>>,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      Simplify<AccountInstance<Shape>>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(
+    id: string,
     options: SubscribeListenerOptions<Simplify<AccountInstance<Shape>>, R>,
-    listener: (
-      value: Resolved<Simplify<AccountInstance<Shape>>, R>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<Resolved<Simplify<AccountInstance<Shape>>, R>>,
+  ): () => void;
+  subscribe<const R extends RefsToResolve<Simplify<AccountInstance<Shape>>>>(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<Simplify<AccountInstance<Shape>>, R>
+      | SubscribeCallback<Resolved<Simplify<AccountInstance<Shape>>, R>>,
+    maybeListener?: SubscribeCallback<
+      Resolved<Simplify<AccountInstance<Shape>>, R>
+    >,
   ): () => void {
+    if (typeof optionsOrListener === "function") {
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        // @ts-expect-error
+        optionsOrListener,
+      );
+    }
     return this.coValueClass.subscribe(
       id,
       // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      maybeListener,
     );
   }
 

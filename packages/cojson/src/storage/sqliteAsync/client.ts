@@ -11,12 +11,16 @@ import type {
   DBTransactionInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
+  StorageReconciliationLockRow,
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
+  StorageReconciliationAcquireResult,
 } from "../types.js";
+import { DeletedCoValueDeletionStatus } from "../types.js";
 import type { SQLiteDatabaseDriverAsync } from "./types.js";
 import type { PeerID } from "../../sync.js";
+import { STORAGE_RECONCILIATION_CONFIG } from "../../config.js";
 
 export type RawCoValueRow = {
   id: RawCoID;
@@ -29,17 +33,175 @@ export type RawTransactionRow = {
   tx: string;
 };
 
+type DeletedCoValueQueueRow = {
+  id: RawCoID;
+};
+
 export function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
-export class SQLiteClientAsync
-  implements DBClientInterfaceAsync, DBTransactionInterfaceAsync
-{
+/**
+ * Executes storage operations inside a single DB transaction.
+ */
+export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
+  constructor(private readonly tx: SQLiteDatabaseDriverAsync) {}
+
+  async getSingleCoValueSession(
+    coValueRowId: number,
+    sessionID: SessionID,
+  ): Promise<StoredSessionRow | undefined> {
+    return this.tx.get<StoredSessionRow>(
+      "SELECT * FROM sessions WHERE coValue = ? AND sessionID = ?",
+      [coValueRowId, sessionID],
+    );
+  }
+
+  async markCoValueAsDeleted(id: RawCoID): Promise<void> {
+    await this.tx.run(
+      `INSERT INTO deletedCoValues (coValueID) VALUES (?) ON CONFLICT(coValueID) DO NOTHING`,
+      [id],
+    );
+  }
+
+  async addSessionUpdate({
+    sessionUpdate,
+  }: {
+    sessionUpdate: SessionRow;
+    sessionRow?: StoredSessionRow;
+  }): Promise<number> {
+    const result = await this.tx.get<{ rowID: number }>(
+      `INSERT INTO sessions (coValue, sessionID, lastIdx, lastSignature, bytesSinceLastSignature) VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(coValue, sessionID) DO UPDATE SET lastIdx=excluded.lastIdx, lastSignature=excluded.lastSignature, bytesSinceLastSignature=excluded.bytesSinceLastSignature
+                            RETURNING rowID`,
+      [
+        sessionUpdate.coValue,
+        sessionUpdate.sessionID,
+        sessionUpdate.lastIdx,
+        sessionUpdate.lastSignature,
+        sessionUpdate.bytesSinceLastSignature,
+      ],
+    );
+
+    if (!result) {
+      throw new Error("Failed to add session update");
+    }
+
+    return result.rowID;
+  }
+
+  async addTransaction(
+    sessionRowID: number,
+    nextIdx: number,
+    newTransaction: Transaction,
+  ): Promise<void> {
+    await this.tx.run(
+      "INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)",
+      [sessionRowID, nextIdx, JSON.stringify(newTransaction)],
+    );
+  }
+
+  async addSignatureAfter({
+    sessionRowID,
+    idx,
+    signature,
+  }: {
+    sessionRowID: number;
+    idx: number;
+    signature: Signature;
+  }): Promise<void> {
+    await this.tx.run(
+      "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?)",
+      [sessionRowID, idx, signature],
+    );
+  }
+
+  async deleteCoValueContent(
+    coValueRow: Pick<StoredCoValueRow, "rowID" | "id">,
+  ): Promise<void> {
+    await this.tx.run(
+      `DELETE FROM transactions
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%$'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    await this.tx.run(
+      `DELETE FROM signatureAfter
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%$'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    await this.tx.run(
+      `DELETE FROM sessions
+       WHERE coValue = ?
+         AND sessionID NOT LIKE '%$'`,
+      [coValueRow.rowID],
+    );
+
+    await this.tx.run(
+      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
+       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
+      [
+        coValueRow.id,
+        DeletedCoValueDeletionStatus.Done,
+        DeletedCoValueDeletionStatus.Done,
+      ],
+    );
+  }
+
+  async getStorageReconciliationLock(
+    key: string,
+  ): Promise<StorageReconciliationLockRow | undefined> {
+    return this.tx.get<StorageReconciliationLockRow>(
+      "SELECT * FROM storageReconciliationLocks WHERE key = ?",
+      [key],
+    );
+  }
+
+  async putStorageReconciliationLock(
+    entry: StorageReconciliationLockRow,
+  ): Promise<void> {
+    const {
+      key,
+      holderSessionId,
+      acquiredAt,
+      releasedAt,
+      lastProcessedOffset,
+    } = entry;
+    await this.tx.run(
+      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?)`,
+      [
+        key,
+        holderSessionId,
+        acquiredAt,
+        releasedAt ?? null,
+        lastProcessedOffset,
+      ],
+    );
+  }
+}
+
+export class SQLiteClientAsync implements DBClientInterfaceAsync {
   private readonly db: SQLiteDatabaseDriverAsync;
+  /** Serialize transactions to avoid SQLITE_BUSY errors */
+  private txQueue = Promise.resolve() as Promise<unknown>;
 
   constructor(db: SQLiteDatabaseDriverAsync) {
     this.db = db;
+  }
+
+  private enqueueTx<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.txQueue.then(fn, fn);
+    this.txQueue = next;
+    return next;
   }
 
   async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
@@ -72,16 +234,6 @@ export class SQLiteClientAsync
     return this.db.query<StoredSessionRow>(
       "SELECT * FROM sessions WHERE coValue = ?",
       [coValueRowId],
-    );
-  }
-
-  async getSingleCoValueSession(
-    coValueRowId: number,
-    sessionID: SessionID,
-  ): Promise<StoredSessionRow | undefined> {
-    return this.db.get<StoredSessionRow>(
-      "SELECT * FROM sessions WHERE coValue = ? AND sessionID = ?",
-      [coValueRowId, sessionID],
     );
   }
 
@@ -146,62 +298,40 @@ export class SQLiteClientAsync
     return result.rowID;
   }
 
-  async addSessionUpdate({
-    sessionUpdate,
-  }: {
-    sessionUpdate: SessionRow;
-  }): Promise<number> {
-    const result = await this.db.get<{ rowID: number }>(
-      `INSERT INTO sessions (coValue, sessionID, lastIdx, lastSignature, bytesSinceLastSignature) VALUES (?, ?, ?, ?, ?)
-                            ON CONFLICT(coValue, sessionID) DO UPDATE SET lastIdx=excluded.lastIdx, lastSignature=excluded.lastSignature, bytesSinceLastSignature=excluded.bytesSinceLastSignature
-                            RETURNING rowID`,
-      [
-        sessionUpdate.coValue,
-        sessionUpdate.sessionID,
-        sessionUpdate.lastIdx,
-        sessionUpdate.lastSignature,
-        sessionUpdate.bytesSinceLastSignature,
-      ],
+  async eraseCoValueButKeepTombstone(coValueId: RawCoID) {
+    const coValueRow = await this.db.get<RawCoValueRow & { rowID: number }>(
+      "SELECT * FROM coValues WHERE id = ?",
+      [coValueId],
     );
 
-    if (!result) {
-      throw new Error("Failed to add session update");
+    if (!coValueRow) {
+      logger.warn(`CoValue ${coValueId} not found, skipping deletion`);
+      return;
     }
 
-    return result.rowID;
+    await this.transaction(async (tx) => {
+      await tx.deleteCoValueContent(coValueRow);
+    });
   }
 
-  addTransaction(
-    sessionRowID: number,
-    nextIdx: number,
-    newTransaction: Transaction,
-  ) {
-    this.db.run("INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)", [
-      sessionRowID,
-      nextIdx,
-      JSON.stringify(newTransaction),
-    ]);
-  }
-
-  async addSignatureAfter({
-    sessionRowID,
-    idx,
-    signature,
-  }: {
-    sessionRowID: number;
-    idx: number;
-    signature: Signature;
-  }) {
-    this.db.run(
-      "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?)",
-      [sessionRowID, idx, signature],
+  async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
+    const rows = await this.db.query<DeletedCoValueQueueRow>(
+      `SELECT coValueID as id
+         FROM deletedCoValues
+         WHERE status = ?`,
+      [DeletedCoValueDeletionStatus.Pending],
     );
+    return rows.map((r) => r.id);
   }
 
   async transaction(
     operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
-  ) {
-    return this.db.transaction(() => operationsCallback(this));
+  ): Promise<unknown> {
+    return this.enqueueTx(() =>
+      this.db.transaction((tx) =>
+        operationsCallback(new SQLiteTransactionAsync(tx)),
+      ),
+    );
   }
 
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
@@ -236,6 +366,111 @@ export class SQLiteClientAsync
     await this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [
       id,
     ]);
+  }
+
+  async getCoValueIDs(
+    limit: number,
+    offset: number,
+  ): Promise<{ id: RawCoID }[]> {
+    return this.db.query<{ id: RawCoID }>(
+      "SELECT id FROM coValues WHERE rowID > ? ORDER BY rowID LIMIT ?",
+      [offset, limit],
+    );
+  }
+
+  async getCoValueCount(): Promise<number> {
+    const row = await this.db.get<{ count: number }>(
+      "SELECT COUNT(*) as count FROM coValues",
+      [],
+    );
+    return row?.count ?? 0;
+  }
+
+  async tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): Promise<StorageReconciliationAcquireResult> {
+    let result: StorageReconciliationAcquireResult = {
+      acquired: false,
+      reason: "not_due",
+    };
+    await this.transaction(async (tx) => {
+      const now = Date.now();
+      const lockKey = `lock#${peerId}`;
+
+      const lockRow = await tx.getStorageReconciliationLock(lockKey);
+      if (
+        lockRow?.releasedAt &&
+        now - lockRow.releasedAt <
+          STORAGE_RECONCILIATION_CONFIG.RECONCILIATION_INTERVAL_MS
+      ) {
+        result = { acquired: false, reason: "not_due" };
+        return;
+      }
+      const expiresAt = lockRow
+        ? lockRow.acquiredAt + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS
+        : 0;
+      const isLockHeldByOtherSession = lockRow?.holderSessionId !== sessionId;
+      if (
+        lockRow &&
+        !lockRow.releasedAt &&
+        expiresAt >= now &&
+        isLockHeldByOtherSession
+      ) {
+        result = { acquired: false, reason: "lock_held" };
+        return;
+      }
+
+      const lastProcessedOffset =
+        lockRow && !lockRow.releasedAt ? (lockRow.lastProcessedOffset ?? 0) : 0;
+      await tx.putStorageReconciliationLock({
+        key: lockKey,
+        holderSessionId: sessionId,
+        acquiredAt: now,
+        lastProcessedOffset,
+      });
+      result = { acquired: true, lastProcessedOffset };
+    });
+    return result;
+  }
+
+  async renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): Promise<void> {
+    await this.transaction(async (tx) => {
+      const lockKey = `lock#${peerId}`;
+      const lockRow = await tx.getStorageReconciliationLock(lockKey);
+      if (
+        lockRow &&
+        lockRow.holderSessionId === sessionId &&
+        !lockRow.releasedAt
+      ) {
+        await tx.putStorageReconciliationLock({
+          ...lockRow,
+          lastProcessedOffset: offset,
+        });
+      }
+    });
+  }
+
+  async releaseStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): Promise<void> {
+    await this.transaction(async (tx) => {
+      const lockKey = `lock#${peerId}`;
+      const releasedAt = Date.now();
+      const lockRow = await tx.getStorageReconciliationLock(lockKey);
+      if (lockRow && lockRow.holderSessionId === sessionId) {
+        await tx.putStorageReconciliationLock({
+          ...lockRow,
+          releasedAt,
+          lastProcessedOffset: 0,
+        });
+      }
+    });
   }
 
   async getCoValueKnownState(

@@ -15,6 +15,8 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
+import { coValueValidationSchema } from "./schemaValidators.js";
 
 export interface CoreRichTextSchema extends CoreCoValueSchema {
   builtin: "CoRichText";
@@ -25,6 +27,7 @@ export function createCoreCoRichTextSchema(): CoreRichTextSchema {
     collaborative: true as const,
     builtin: "CoRichText" as const,
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -33,9 +36,31 @@ export class RichTextSchema implements CoreRichTextSchema {
   readonly builtin = "CoRichText" as const;
   readonly resolveQuery = true as const;
 
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  #permissions: SchemaPermissions | null = null;
+  #validationSchema: z.ZodType | undefined = undefined;
+  /**
+   * Permissions to be used when creating or composing CoValues
+   * @internal
+   */
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(private coValueClass: typeof CoRichText) {}
+
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const validationSchema = z.string();
+
+    this.#validationSchema = coValueValidationSchema(
+      validationSchema,
+      CoRichText,
+    );
+    return this.#validationSchema;
+  };
 
   create(text: string, options?: { owner: Group } | Group): CoRichText;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
@@ -100,9 +125,11 @@ export class RichTextSchema implements CoreRichTextSchema {
   /**
    * Configure permissions to be used when creating or composing CoValues
    */
-  withPermissions(permissions: SchemaPermissions): RichTextSchema {
+  withPermissions(
+    permissions: Omit<SchemaPermissions, "writer">,
+  ): RichTextSchema {
     const copy = new RichTextSchema(this.coValueClass);
-    copy.permissions = permissions;
+    copy.#permissions = permissions;
     return copy;
   }
 }

@@ -10,7 +10,7 @@ import {
   isInheritableRole,
   isSelfExtension,
 } from "./coValues/group.js";
-import { KeyID } from "./crypto/crypto.js";
+import { KeyID, SealerID } from "./crypto/crypto.js";
 import {
   AgentID,
   ParentGroupReference,
@@ -22,7 +22,7 @@ import { expectGroup } from "./typeUtils/expectGroup.js";
 
 export type PermissionsDef =
   | { type: "group"; initialAdmin: RawAccountID | AgentID }
-  | { type: "ownedByGroup"; group: RawCoID }
+  | { type: "ownedByGroup"; group: RawCoID; restrictDeletion?: boolean }
   | { type: "unsafeAllowAll" };
 
 export type AccountRole =
@@ -235,6 +235,7 @@ function determineValidTransactionsForGroup(
   const writeOnlyKeys: Record<RawAccountID | AgentID, KeyID> = {};
   const writeKeys = new Set<string>();
   const memberRoleResolver = new MemberRoleResolver();
+  const isGroup = coValue.isGroup();
 
   for (const transaction of coValue.verifiedTransactions) {
     const transactor = transaction.author;
@@ -247,6 +248,11 @@ function determineValidTransactionsForGroup(
     const tx = transaction.tx;
 
     if (tx.privacy === "private") {
+      if (isGroup) {
+        transaction.markInvalid("Can't make private transactions in groups");
+        continue;
+      }
+
       if (transactorRole === "admin") {
         transaction.markValid();
         continue;
@@ -267,6 +273,7 @@ function determineValidTransactionsForGroup(
     const change = changes[0] as
       | MapOpPayload<RawAccountID | AgentID | Everyone, Role>
       | MapOpPayload<"readKey", JsonValue>
+      | MapOpPayload<"groupSealer", SealerID>
       | MapOpPayload<"profile", CoID<RawProfile>>
       | MapOpPayload<"root", CoID<RawCoMap>>
       | MapOpPayload<`parent_${CoID<RawGroup>}`, CoID<RawGroup>>
@@ -290,6 +297,14 @@ function determineValidTransactionsForGroup(
 
       transaction.markValid();
       continue;
+    } else if (change.key === "groupSealer") {
+      if (!canAdmin(transactorRole)) {
+        transaction.markInvalid("Only admins can set groupSealer");
+        continue;
+      }
+
+      transaction.markValid();
+      continue;
     } else if (change.key === "profile") {
       if (!canAdmin(transactorRole)) {
         transaction.markInvalid("Only admins can set profile");
@@ -308,7 +323,8 @@ function determineValidTransactionsForGroup(
       continue;
     } else if (
       isKeyForKeyField(change.key) ||
-      isKeyForAccountField(change.key)
+      isKeyForAccountField(change.key) ||
+      isKeySealedForGroupField(change.key)
     ) {
       if (
         transactorRole !== "admin" &&
@@ -590,6 +606,12 @@ export function isKeyForAccountField(
   );
 }
 
+export function isKeySealedForGroupField(
+  co: string,
+): co is `${KeyID}_sealedFor_${SealerID}` {
+  return co.startsWith("key_") && co.includes("_sealedFor_sealer");
+}
+
 function isParentExtension(key: string): key is `parent_${CoID<RawGroup>}` {
   return key.startsWith("parent_");
 }
@@ -599,15 +621,22 @@ function isChildExtension(key: string): key is `child_${CoID<RawGroup>}` {
 }
 
 function isOwnWriteKeyRevelation(
-  key: `${KeyID}_for_${string}`,
+  key: `${KeyID}_for_${string}` | `${KeyID}_sealedFor_${SealerID}`,
   memberKey: RawAccountID | AgentID,
   writeOnlyKeys: Record<RawAccountID | AgentID, KeyID>,
-): key is `${KeyID}_for_${RawAccountID | AgentID}` {
-  if (Object.keys(writeOnlyKeys).length === 0) {
-    return false;
+): key is
+  | `${KeyID}_for_${RawAccountID | AgentID}`
+  | `${KeyID}_sealedFor_${SealerID}` {
+  let i = key.indexOf("_for_");
+  if (i === -1) {
+    i = key.indexOf("_sealedFor_");
   }
 
-  const keyID = key.slice(0, key.indexOf("_for_"));
+  const keyID = key.slice(0, i);
+
+  if (!keyID) {
+    return false;
+  }
 
   return writeOnlyKeys[memberKey] === keyID;
 }

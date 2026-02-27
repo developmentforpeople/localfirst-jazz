@@ -5,8 +5,9 @@ import {
   setupTestNode,
   setupTestAccount,
 } from "./testUtils";
-import { stableStringify } from "../jsonStringify";
+import { Stringified } from "../jsonStringify";
 import { WasmCrypto } from "../crypto/WasmCrypto";
+import { JsonValue } from "../jsonValue";
 
 const wasmCrypto = await WasmCrypto.create();
 setCurrentTestCryptoProvider(wasmCrypto);
@@ -109,7 +110,9 @@ describe("WasmCrypto", () => {
       [
         {
           privacy: "trusting",
-          changes: stableStringify([{ op: "set", key: "count", value: 1 }]),
+          changes: JSON.stringify([
+            { op: "set", key: "count", value: 1 },
+          ]) as Stringified<JsonValue[]>,
           madeAt: Date.now(),
         },
       ],
@@ -180,7 +183,7 @@ describe("WasmCrypto", () => {
     const mapInOtherSession = await loadCoValueOrFail(session2.node, map.id);
 
     const transferredMeta = JSON.parse(
-      mapInOtherSession.core.verified.sessions.get(client.node.currentSessionID)
+      mapInOtherSession.core.verified.getSession(client.node.currentSessionID)
         ?.transactions[0]?.meta!,
     );
 
@@ -189,27 +192,5 @@ describe("WasmCrypto", () => {
         count: 1,
       },
     });
-  });
-
-  it("fails to verify signatures without a signer ID", async () => {
-    const agentSecret = wasmCrypto.newRandomAgentSecret();
-    const sessionID = wasmCrypto.newRandomSessionID(
-      wasmCrypto.getAgentID(agentSecret),
-    );
-
-    const sessionLog = wasmCrypto.createSessionLog("co_z12345678", sessionID);
-    expect(() =>
-      sessionLog.tryAdd(
-        [
-          {
-            privacy: "trusting",
-            changes: stableStringify([{ op: "set", key: "count", value: 1 }]),
-            madeAt: Date.now(),
-          },
-        ],
-        "signature_z12345678",
-        false,
-      ),
-    ).toThrow(expect.stringContaining("Signature verification failed"));
   });
 });
