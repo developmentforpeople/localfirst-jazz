@@ -4,9 +4,8 @@ import {
   MiddlewareContext,
   MiddlewareOptions,
 } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
-import { createAuthMiddleware } from "better-auth/plugins";
 import type { Account, AuthCredentials, ID } from "jazz-tools";
 
 // Define a type to have user fields mapped in the better-auth instance
@@ -216,7 +215,8 @@ export const jazzPlugin: () => JazzPlugin = () => {
             return context.path?.startsWith("/sign-in/email-otp") || false;
           },
           handler: createAuthMiddleware(async (ctx) => {
-            const email = ctx.body.email;
+            // lowercase the email as done in https://github.com/better-auth/better-auth/blob/40a80b070bbabf2d6886e8a3ad1bc068c8d570cb/packages/better-auth/src/plugins/email-otp/routes.ts#L641
+            const email = ctx.body.email.toLowerCase();
             const identifier = `jazz-auth-sign-in-otp-${email}`;
 
             const data =

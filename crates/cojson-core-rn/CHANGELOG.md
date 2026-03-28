@@ -1,5 +1,17 @@
 # cojson-core-rn
 
+## 0.20.15
+
+## 0.20.14
+
+## 0.20.13
+
+## 0.20.12
+
+### Patch Changes
+
+- debcb49: Add x86_64 iOS simulator support to the `cojson-core-rn` XCFramework build configuration.
+
 ## 0.20.11
 
 ## 0.20.10

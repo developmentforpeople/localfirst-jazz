@@ -192,15 +192,26 @@
       "@jazz-tools/source": "./src/worker/napi-crypto.ts",
       "types": "./dist/worker/napi-crypto.d.ts",
       "default": "./dist/worker/napi-crypto.js"
+    },
+    "./mcp": {
+      "@jazz-tools/source": "./src/mcp/server.ts",
+      "types": "./dist/mcp/server.d.ts",
+      "default": "./dist/mcp/server.js"
+    },
+    "./mcp/build-index": {
+      "@jazz-tools/source": "./src/mcp/build-index.ts",
+      "types": "./dist/mcp/build-index.d.ts",
+      "default": "./dist/mcp/build-index.js"
     }
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.20.11",
+  "version": "0.20.15",
   "dependencies": {
     "@scure/base": "1.2.1",
     "@scure/bip39": "^1.3.0",
-    "@tiptap/core": "^2.12.0",
+    "@tiptap/core": "catalog:tiptap",
+    "@tiptap/pm": "catalog:tiptap",
     "clsx": "^2.0.0",
     "cojson": "workspace:*",
     "cojson-storage-indexeddb": "workspace:*",

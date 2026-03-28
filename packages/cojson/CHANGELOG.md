@@ -1,5 +1,43 @@
 # cojson
 
+## 0.20.15
+
+### Patch Changes
+
+- 7446c56: Add an incoming queue metric that measures sync message processing time by
+  `messageType`.
+- Updated dependencies [2d5cb0b]
+  - cojson-core-wasm@0.20.15
+  - cojson-core-rn@0.20.15
+  - cojson-core-napi@0.20.15
+
+## 0.20.14
+
+### Patch Changes
+
+- 4bbfce2: Avoid recursive WASM aliasing errors when checking streaming state, including the `newContentSince()` path.
+  - cojson-core-wasm@0.20.14
+  - cojson-core-rn@0.20.14
+  - cojson-core-napi@0.20.14
+
+## 0.20.13
+
+### Patch Changes
+
+- 9877c61: Add a new incoming queue metric that tracks pushed sync messages by type (`messageType`).
+  - cojson-core-wasm@0.20.13
+  - cojson-core-rn@0.20.13
+  - cojson-core-napi@0.20.13
+
+## 0.20.12
+
+### Patch Changes
+
+- Updated dependencies [debcb49]
+  - cojson-core-rn@0.20.12
+  - cojson-core-wasm@0.20.12
+  - cojson-core-napi@0.20.12
+
 ## 0.20.11
 
 ### Patch Changes

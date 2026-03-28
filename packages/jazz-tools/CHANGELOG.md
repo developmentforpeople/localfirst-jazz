@@ -1,5 +1,47 @@
 # jazz-tools
 
+## 0.20.15
+
+### Patch Changes
+
+- 05b28a9: Fix race condition in `AuthSecretStorage.set()` where `isAuthenticated` was set to `true` before the KV store write completed, causing spurious logouts in the BetterAuth client.
+- 53bd0c4: Correctly handle `z.partialRecord` to allow optional enum keys
+- 109afa7: Introduce `omit`, `extend`, and `safeExtend` methods to CoMap schemas
+- Updated dependencies [7446c56]
+  - cojson@0.20.15
+  - cojson-storage-indexeddb@0.20.15
+  - cojson-transport-ws@0.20.15
+
+## 0.20.14
+
+### Patch Changes
+
+- Updated dependencies [4bbfce2]
+  - cojson@0.20.14
+  - cojson-storage-indexeddb@0.20.14
+  - cojson-transport-ws@0.20.14
+
+## 0.20.13
+
+### Patch Changes
+
+- 307b11d: fix(better-auth): import createAuthMiddleware from better-auth/api for compatibility with better-auth 1.5.3
+- 1acba7b: Add MCP docs server exposing Jazz documentation as searchable tools for AI assistants, accessible via `jazz-run mcp`.
+- 53c2cc2: Updated `jazz-tools/tiptap` to align `JazzSyncExtension` with the Tiptap 3 plugin interface and allow `coRichText` to be initialized later before syncing starts.
+- Updated dependencies [9877c61]
+  - cojson@0.20.13
+  - cojson-storage-indexeddb@0.20.13
+  - cojson-transport-ws@0.20.13
+
+## 0.20.12
+
+### Patch Changes
+
+- 9a43096: Fixed Better Auth email OTP sign-in to handle email addresses case-insensitively.
+  - cojson@0.20.12
+  - cojson-storage-indexeddb@0.20.12
+  - cojson-transport-ws@0.20.12
+
 ## 0.20.11
 
 ### Patch Changes

@@ -1,7 +1,40 @@
 use cojson_core::core::{CoJsonCoreError, SessionMapImpl};
 use serde::Serialize;
+use std::sync::Once;
 use thiserror::Error;
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen(inline_js = "
+export function dumpWasmPanic(message) {
+  queueMicrotask(() => {
+    throw new Error(`Wasm panic: ${message}`);
+  })
+}
+")]
+extern "C" {
+    #[wasm_bindgen(js_name = dumpWasmPanic)]
+    fn dump_wasm_panic(message: &str);
+}
+
+#[cfg(feature = "console_error_panic_hook")]
+fn install_panic_hook() {
+    static INSTALL_PANIC_HOOK: Once = Once::new();
+
+    INSTALL_PANIC_HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|panic_info| {
+            dump_wasm_panic(&panic_info.to_string());
+            console_error_panic_hook::hook(panic_info);
+        }));
+    });
+}
+
+#[cfg(not(feature = "console_error_panic_hook"))]
+fn install_panic_hook() {}
+
+#[wasm_bindgen(start)]
+pub fn init() {
+    install_panic_hook();
+}
 
 pub mod hash {
     pub mod blake3;
@@ -40,6 +73,16 @@ impl From<CojsonCoreWasmError> for JsValue {
     fn from(err: CojsonCoreWasmError) -> Self {
         JsValue::from_str(&err.to_string())
     }
+}
+
+fn serialize_js_value<T>(value: T) -> JsValue
+where
+    T: Serialize,
+{
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    value
+        .serialize(&serializer)
+        .expect("KnownState serialization should not fail")
 }
 
 // ============================================================================
@@ -228,27 +271,23 @@ impl SessionMap {
     /// Get the known state as a native JavaScript object
     #[wasm_bindgen(js_name = getKnownState)]
     pub fn get_known_state(&self) -> JsValue {
-        // Use serialize_maps_as_objects to convert BTreeMap to JS object instead of Map
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        self.internal
-            .get_known_state()
-            .serialize(&serializer)
-            .expect("KnownState serialization should not fail")
+        serialize_js_value(self.internal.get_known_state().clone())
     }
 
     /// Get the known state with streaming as a native JavaScript object
     #[wasm_bindgen(js_name = getKnownStateWithStreaming)]
     pub fn get_known_state_with_streaming(&self) -> JsValue {
-        match self.internal.get_known_state_with_streaming() {
-            Some(ks) => {
-                // Use serialize_maps_as_objects to convert BTreeMap to JS object instead of Map
-                let serializer =
-                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-                ks.serialize(&serializer)
-                    .expect("KnownState serialization should not fail")
-            }
-            None => JsValue::undefined(),
-        }
+        self.internal
+            .get_known_state_with_streaming()
+            .cloned()
+            .map(serialize_js_value)
+            .unwrap_or_else(JsValue::undefined)
+    }
+
+    /// Check whether the CoValue still has pending streaming content.
+    #[wasm_bindgen(js_name = isStreaming)]
+    pub fn is_streaming(&self) -> bool {
+        self.internal.is_streaming()
     }
 
     /// Set streaming known state

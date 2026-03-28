@@ -5,7 +5,7 @@
   "types": "dist/index.d.ts",
   "type": "module",
   "license": "MIT",
-  "version": "0.20.11",
+  "version": "0.20.15",
   "scripts": {
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
@@ -27,6 +27,7 @@
     "jazz-tools": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^22.16.5",
     "@types/ws": "8.5.10",
     "typescript": "catalog:default",
     "vitest": "catalog:default"

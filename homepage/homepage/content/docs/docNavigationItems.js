@@ -398,6 +398,11 @@ export const docNavigationItems = [
 				],
 			},
 			{
+				name: "Deployment",
+				href: "/docs/server-side/deployment",
+				done: 100,
+			},
+			{
 				name: "Server-side rendering",
 				href: "/docs/server-side/ssr",
 				done: {
@@ -438,6 +443,11 @@ export const docNavigationItems = [
 					{
 						name: "AI tools (llms.txt)",
 						href: "/docs/tooling-and-resources/ai-tools",
+						done: 100,
+					},
+					{
+						name: "MCP server",
+						href: "/docs/tooling-and-resources/mcp-server",
 						done: 100,
 					},
 				],
