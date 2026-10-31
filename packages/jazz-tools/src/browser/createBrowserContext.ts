@@ -24,6 +24,10 @@ import { createJazzContext } from "jazz-tools";
 import { setupInspector } from "./utils/export-account-inspector.js";
 import { getBrowserLockSessionProvider } from "./provideBrowserLockSession/index.js";
 
+// DFP added export: dfp-files-manager builds its own browser context (to reuse mesh peers on a
+// login) and needs the same per-tab session locking that createJazzBrowserContext uses.
+export { getBrowserLockSessionProvider };
+
 setupInspector();
 
 export type BaseBrowserContextOptions = {
