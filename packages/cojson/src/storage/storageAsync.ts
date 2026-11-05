@@ -258,8 +258,11 @@ export class StorageApiAsync implements StorageAPI {
       }
 
       promises.push(
-        new Promise((resolve) => {
-          this.loadCoValue(dependedOnCoValue, pushCallback, resolve);
+        new Promise((resolve, reject) => {
+          // Rejected up the chain: the read waiting on this one would otherwise never end.
+          this.loadCoValue(dependedOnCoValue, pushCallback, resolve).catch(
+            reject,
+          );
         }),
       );
     }

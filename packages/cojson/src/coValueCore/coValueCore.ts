@@ -58,6 +58,7 @@ import {
   isKnownStateSubsetOf,
   KnownStateSessions,
 } from "../knownState.js";
+import { knownStateFromContent } from "../coValueContentMessage.js";
 import { safeParseJSON } from "../jsonStringify.js";
 
 export function idforHeader(
@@ -584,10 +585,22 @@ export class CoValueCore {
     this.#contentExpectedFromStorage = { ...sessions };
   }
 
-  /** Storage will not deliver the rest: a failed read or a chunk that does not verify. */
+  /**
+   * Storage will not deliver the rest: a failed read or a chunk that does not verify.
+   *
+   * It only matters while this core has less than what was announced. A read racing the writes of
+   * a CoValue still arriving can trip over a chunk with the core already ahead of it, and then
+   * nothing was promised and nobody is waiting.
+   */
   stopExpectingContentFromStorage() {
+    const wasWaiting = this.isWaitingForStorage();
+
     this.#contentExpectedFromStorage = undefined;
-    this.scheduleNotifyUpdate();
+
+    if (wasWaiting) {
+      this.node.syncManager.correctPeersAfterFailedRead(this);
+      this.scheduleNotifyUpdate();
+    }
   }
 
   /**
@@ -604,20 +617,61 @@ export class CoValueCore {
     );
   }
 
+  /**
+   * What this node has, mounted or not: the core plus what storage announced and has not delivered.
+   * Mid-remount the core alone would tell a peer it still owes what is already on disk.
+   */
+  knownStateWithStorage(): CoValueKnownState {
+    const knownState = cloneKnownState(this.knownState());
+
+    if (this.#contentExpectedFromStorage) {
+      combineKnownStateSessions(
+        knownState.sessions,
+        this.#contentExpectedFromStorage,
+      );
+    }
+
+    return knownState;
+  }
+
+  /**
+   * True when a peer's content brings nothing new and can be answered without mounting anything.
+   *
+   * A core that is fully mounted is left out, because it judges the piece itself. So is a failed
+   * read: the cached knownState says what the node had, the peer is now the way back to it. A piece
+   * that announces more than this node has is not a duplicate either: it starts a stream that
+   * `isStreaming()` has to know about.
+   */
+  alreadyHasContent(msg: NewContentMessage): boolean {
+    if (this.hasVerifiedContent() && !this.isWaitingForStorage()) {
+      return false;
+    }
+
+    if (this.getLoadingStateForPeer("storage") === "unavailable") {
+      return false;
+    }
+
+    const { header, sessions } = this.knownStateWithStorage();
+
+    return (
+      header &&
+      isKnownStateSubsetOf(knownStateFromContent(msg).sessions, sessions) &&
+      isKnownStateSubsetOf(msg.expectContentUntil ?? {}, sessions)
+    );
+  }
+
   contentWaitingForStorage: {
     msg: NewContentMessage;
-    from: PeerState | "storage" | "import";
+    from: PeerState;
   }[] = [];
   /**
-   * Hold content until storage has delivered what it announced, and judge it then.
+   * Hold a peer's piece that is ahead of this core until storage has delivered what it announced,
+   * and judge it again then: it is only a gap if it still does not fit.
    *
    * Not `newContentQueue`: a chunk from storage can land there waiting for a dependency, and if
    * that queue also waited for storage the chunk would be waiting for itself.
    */
-  holdContentUntilStorageDelivers(
-    msg: NewContentMessage,
-    from: PeerState | "storage" | "import",
-  ) {
+  holdContentUntilStorageDelivers(msg: NewContentMessage, from: PeerState) {
     const alreadyHeld = this.contentWaitingForStorage.length > 0;
 
     this.contentWaitingForStorage.push({ msg, from });
@@ -2055,20 +2109,7 @@ export class CoValueCore {
       }
 
       // Loading the value
-      this.subscribe((state, unsubscribe) => {
-        const updatedState = state.getLoadingStateForPeer("storage");
-
-        if (updatedState === "available" || state.isAvailable()) {
-          unsubscribe();
-          done(true);
-        } else if (
-          updatedState === "errored" ||
-          updatedState === "unavailable"
-        ) {
-          unsubscribe();
-          done(false);
-        }
-      });
+      this.answerWhenMountedFromStorage(done);
       return;
     }
 
@@ -2087,20 +2128,68 @@ export class CoValueCore {
     }
 
     this.markPending("storage");
-    node.storage.load(
-      this.id,
-      (data) => {
-        node.syncManager.handleNewContent(data, "storage");
-      },
-      (found) => {
-        done?.(found);
 
-        if (!found) {
-          this.#contentExpectedFromStorage = undefined;
-          this.markNotFoundInPeer("storage");
-        }
-      },
-    );
+    let answered = false;
+    const answer = (found: boolean) => {
+      answered = true;
+      done?.(found);
+
+      if (!found) {
+        this.stopExpectingContentFromStorage();
+        this.markNotFoundInPeer("storage");
+      }
+    };
+
+    // `load` returns void in the interface and a promise in both storages. A read that throws would
+    // reject it unheld and never answer, and whatever waits for this CoValue would wait for ever.
+    // Caught here and not in `load` so that `jazz-storage-guard` still sees the failure first.
+    Promise.resolve(
+      node.storage.load(
+        this.id,
+        (data) => {
+          node.syncManager.handleNewContent(data, "storage");
+        },
+        answer,
+      ),
+    ).catch((err) => {
+      logger.warn("Failed to load CoValue from storage", { id: this.id, err });
+
+      if (!answered) {
+        answer(false);
+      }
+    });
+  }
+
+  /**
+   * Reads this CoValue from storage and answers once it is mounted, which is the first chunk: that
+   * is all a piece of content needs to be judged.
+   *
+   * Not `loadFromStorage(done)`: when that call starts the read, `done` goes to storage, and an
+   * async storage calls it after the last chunk. The piece would land behind the ones that arrived
+   * after it, opening the gap it was meant to fill.
+   */
+  mountFromStorage(done: (found: boolean) => void) {
+    this.loadFromStorage();
+
+    if (this.getLoadingStateForPeer("storage") === "pending") {
+      this.answerWhenMountedFromStorage(done);
+    } else {
+      done(this.isAvailable());
+    }
+  }
+
+  private answerWhenMountedFromStorage(done: (found: boolean) => void) {
+    this.subscribe((state, unsubscribe) => {
+      const updatedState = state.getLoadingStateForPeer("storage");
+
+      if (updatedState === "available" || state.isAvailable()) {
+        unsubscribe();
+        done(true);
+      } else if (updatedState === "errored" || updatedState === "unavailable") {
+        unsubscribe();
+        done(false);
+      }
+    });
   }
 
   /**

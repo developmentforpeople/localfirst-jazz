@@ -1107,6 +1107,12 @@ export class SyncManager {
     }
 
     peer?.trackLoadRequestUpdate(coValue);
+
+    if (peer && coValue.alreadyHasContent(msg)) {
+      this.acknowledgeDuplicate(msg, coValue, peer);
+      return;
+    }
+
     coValue.addDependenciesFromContentMessage(msg);
 
     // If some of the dependencies are missing, we wait for them to be available
@@ -1169,11 +1175,7 @@ export class SyncManager {
         }
 
         // Try to load from storage - the CoValue might have been garbage collected from memory
-        // Started apart from the wait, so this piece answers at the first chunk like the ones that
-        // arrive behind it. The `done` of the read comes at the last chunk on an async storage, and
-        // this piece would land after them, opening the gap it was meant to fill.
-        coValue.loadFromStorage();
-        coValue.loadFromStorage((found) => {
+        coValue.mountFromStorage((found) => {
           if (found) {
             // CoValue was in storage, process the new content
             this.handleNewContent(msg, from);
@@ -1214,9 +1216,6 @@ export class SyncManager {
           sessions: msg.expectContentUntil,
         });
       }
-    } else if (from !== "storage" && coValue.isWaitingForStorage()) {
-      coValue.holdContentUntilStorageDelivers(msg, from);
-      return;
     } else if (msg.expectContentUntil) {
       coValue.verified.setStreamingKnownState(msg.expectContentUntil);
     }
@@ -1299,7 +1298,10 @@ export class SyncManager {
             sessionID,
             errorType: error.type,
           });
-          coValue.stopExpectingContentFromStorage();
+
+          if (from === "storage") {
+            coValue.stopExpectingContentFromStorage();
+          }
         }
         continue;
       }
@@ -1330,9 +1332,19 @@ export class SyncManager {
     }
 
     /**
+     * Mid-remount this core only reflects the chunks read so far, so storage may still fill the gap
+     */
+    const heldForStorage =
+      invalidStateAssumed &&
+      peer !== undefined &&
+      coValue.isWaitingForStorage();
+
+    /**
      * Check if we lack some transactions to be able to load the new content
      */
-    if (invalidStateAssumed) {
+    if (heldForStorage) {
+      coValue.holdContentUntilStorageDelivers(msg, peer);
+    } else if (invalidStateAssumed) {
       if (peer) {
         this.trySendToPeer(peer, {
           action: "known",
@@ -1349,7 +1361,10 @@ export class SyncManager {
             knownState: coValue.knownState(),
           },
         );
-        coValue.stopExpectingContentFromStorage();
+
+        if (from === "storage") {
+          coValue.stopExpectingContentFromStorage();
+        }
       }
     } else if (peer) {
       /**
@@ -1387,6 +1402,11 @@ export class SyncManager {
       }
     }
 
+    // What verified is stored above. The answer and the rest wait for this piece's second pass.
+    if (heldForStorage) {
+      return;
+    }
+
     peer?.trackLoadRequestComplete(coValue, "content");
     if (peer && !coValue.isStreaming()) {
       this.maybeMarkCoValueAsReconciled(peer, msg.id);
@@ -1407,6 +1427,45 @@ export class SyncManager {
         this.sendNewContent(coValue.id, peer);
       } else if (peer.role === "server") {
         peer.sendLoadRequest(coValue, "low-priority");
+      }
+    }
+  }
+
+  /**
+   * A peer sent what this node already has, so all it needs is to hear that. The rest of
+   * `handleNewContent` would mount a CoValue that may have just been released, to learn nothing.
+   */
+  private acknowledgeDuplicate(
+    msg: NewContentMessage,
+    coValue: CoValueCore,
+    peer: PeerState,
+  ) {
+    peer.combineWith(msg.id, knownStateFromContent(msg));
+    this.trySendToPeer(peer, {
+      action: "known",
+      ...coValue.knownStateWithStorage(),
+    });
+    peer.trackToldKnownState(msg.id);
+    // As `known` and not `content`: mid-remount the core is streaming, and that gate waits for a
+    // next piece of this peer's that may not come. The peer has been answered.
+    peer.trackLoadRequestComplete(coValue, "known");
+    this.maybeMarkCoValueAsReconciled(peer, msg.id);
+  }
+
+  /**
+   * `acknowledgeDuplicate` counts what storage announced, and a peer told that will not send it
+   * again. Storage has just broken that promise, so every peer following this CoValue hears the
+   * truth.
+   */
+  correctPeersAfterFailedRead(coValue: CoValueCore) {
+    for (const peer of this.getPeers(coValue.id)) {
+      if (peer.isCoValueSubscribedToPeer(coValue.id)) {
+        this.trySendToPeer(peer, {
+          action: "known",
+          isCorrection: true,
+          ...coValue.knownState(),
+        });
+        peer.trackToldKnownState(coValue.id);
       }
     }
   }
