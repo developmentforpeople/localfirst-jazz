@@ -55,6 +55,7 @@ import {
   combineKnownStateSessions,
   CoValueKnownState,
   emptyKnownState,
+  isKnownStateSubsetOf,
   KnownStateSessions,
 } from "../knownState.js";
 import { safeParseJSON } from "../jsonStringify.js";
@@ -565,6 +566,73 @@ export class CoValueCore {
         this.newContentQueue = [];
 
         for (const { msg, from } of enqueuedNewContent) {
+          this.node.syncManager.handleNewContent(msg, from);
+        }
+      },
+    });
+  }
+
+  /**
+   * What storage announced with the first chunk of a CoValue too big for one message, so the end
+   * of the read is known without asking `isStreaming()`: that one also tracks what peers declare,
+   * and a peer's piece must never wait for that peer's own stream to end.
+   */
+  #contentExpectedFromStorage: KnownStateSessions | undefined;
+
+  expectContentFromStorage(sessions: KnownStateSessions) {
+    // A copy: storage keeps moving the object it announces as it writes.
+    this.#contentExpectedFromStorage = { ...sessions };
+  }
+
+  /** Storage will not deliver the rest: a failed read or a chunk that does not verify. */
+  stopExpectingContentFromStorage() {
+    this.#contentExpectedFromStorage = undefined;
+    this.scheduleNotifyUpdate();
+  }
+
+  /**
+   * True while this core knows less than storage announced. Mid-remount the core only reflects the
+   * chunks read so far, so it cannot tell a gap from what is still on its way from disk.
+   */
+  isWaitingForStorage(): boolean {
+    const expected = this.#contentExpectedFromStorage;
+
+    return (
+      expected !== undefined &&
+      !this.isDeleted &&
+      !isKnownStateSubsetOf(expected, this.knownState().sessions)
+    );
+  }
+
+  contentWaitingForStorage: {
+    msg: NewContentMessage;
+    from: PeerState | "storage" | "import";
+  }[] = [];
+  /**
+   * Hold content until storage has delivered what it announced, and judge it then.
+   *
+   * Not `newContentQueue`: a chunk from storage can land there waiting for a dependency, and if
+   * that queue also waited for storage the chunk would be waiting for itself.
+   */
+  holdContentUntilStorageDelivers(
+    msg: NewContentMessage,
+    from: PeerState | "storage" | "import",
+  ) {
+    const alreadyHeld = this.contentWaitingForStorage.length > 0;
+
+    this.contentWaitingForStorage.push({ msg, from });
+
+    if (alreadyHeld) {
+      return;
+    }
+
+    this.waitFor({
+      predicate: (core) => !core.isWaitingForStorage(),
+      onSuccess: () => {
+        const held = this.contentWaitingForStorage;
+        this.contentWaitingForStorage = [];
+
+        for (const { msg, from } of held) {
           this.node.syncManager.handleNewContent(msg, from);
         }
       },
@@ -2028,6 +2096,7 @@ export class CoValueCore {
         done?.(found);
 
         if (!found) {
+          this.#contentExpectedFromStorage = undefined;
           this.markNotFoundInPeer("storage");
         }
       },

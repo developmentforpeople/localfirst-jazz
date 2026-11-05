@@ -1138,6 +1138,10 @@ export class SyncManager {
       return;
     }
 
+    if (from === "storage" && msg.expectContentUntil) {
+      coValue.expectContentFromStorage(msg.expectContentUntil);
+    }
+
     /**
      * Check if we have the CoValue in memory
      */
@@ -1165,6 +1169,10 @@ export class SyncManager {
         }
 
         // Try to load from storage - the CoValue might have been garbage collected from memory
+        // Started apart from the wait, so this piece answers at the first chunk like the ones that
+        // arrive behind it. The `done` of the read comes at the last chunk on an async storage, and
+        // this piece would land after them, opening the gap it was meant to fill.
+        coValue.loadFromStorage();
         coValue.loadFromStorage((found) => {
           if (found) {
             // CoValue was in storage, process the new content
@@ -1206,6 +1214,9 @@ export class SyncManager {
           sessions: msg.expectContentUntil,
         });
       }
+    } else if (from !== "storage" && coValue.isWaitingForStorage()) {
+      coValue.holdContentUntilStorageDelivers(msg, from);
+      return;
     } else if (msg.expectContentUntil) {
       coValue.verified.setStreamingKnownState(msg.expectContentUntil);
     }
@@ -1288,6 +1299,7 @@ export class SyncManager {
             sessionID,
             errorType: error.type,
           });
+          coValue.stopExpectingContentFromStorage();
         }
         continue;
       }
@@ -1337,6 +1349,7 @@ export class SyncManager {
             knownState: coValue.knownState(),
           },
         );
+        coValue.stopExpectingContentFromStorage();
       }
     } else if (peer) {
       /**

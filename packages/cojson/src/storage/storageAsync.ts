@@ -170,7 +170,11 @@ export class StorageApiAsync implements StorageAPI {
     let contentMessage = createContentMessage(coValueRow.id, coValueRow.header);
 
     if (contentStreaming) {
-      contentMessage.expectContentUntil = knownState.sessions;
+      // From the rows that will be read and not from `knownState`: that one is shared with the
+      // writes, and a store landing before the first chunk would announce what nobody delivers.
+      contentMessage.expectContentUntil = Object.fromEntries(
+        allCoValueSessions.map((row) => [row.sessionID, row.lastIdx]),
+      );
     }
 
     for (const sessionRow of allCoValueSessions) {
